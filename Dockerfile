@@ -40,7 +40,7 @@ EXPOSE 8080
 
 # Default environment variables
 ENV POSTGRES_URL="postgresql://postgres:postgres@postgres:5432/postgres" \
-    WS_BIND_ADDR="0.0.0.0:8080" \
+    WS_ADDR="0.0.0.0:8080" \
     LOG_LEVEL="alle=info,info"
 
 # Distroless runs as nonroot user (65532) by default

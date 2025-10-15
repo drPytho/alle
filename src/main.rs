@@ -31,15 +31,6 @@ struct Args {
     )]
     log_level: String,
 
-    /// WebSocket server URL
-    #[arg(
-        short = 'w',
-        long,
-        env = "WS_URL",
-        default_value = "ws://127.0.0.1:8080"
-    )]
-    ws_url: String,
-
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -58,6 +49,15 @@ enum Commands {
             default_value = ""
         )]
         channels: Vec<String>,
+
+        /// WebSocket server URL
+        #[arg(
+            short = 'w',
+            long,
+            env = "WS_BIND_ADDR",
+            default_value = "127.0.0.1:8080"
+        )]
+        ws_bind_addr: String,
     },
 
     /// Listen to channels via WebSocket connection
@@ -65,6 +65,14 @@ enum Commands {
         /// Channels to listen on (optional - use REPL to subscribe interactively)
         #[arg(value_delimiter = ',')]
         channels: Vec<String>,
+        /// WebSocket server URL
+        #[arg(
+            short = 'w',
+            long,
+            env = "WS_URL",
+            default_value = "ws://127.0.0.1:8080"
+        )]
+        ws_url: String,
     },
 
     /// Publish a notification via WebSocket connection
@@ -76,6 +84,14 @@ enum Commands {
         /// Message payload to send
         #[arg(required = true)]
         payload: String,
+        /// WebSocket server URL
+        #[arg(
+            short = 'w',
+            long,
+            env = "WS_URL",
+            default_value = "ws://127.0.0.1:8080"
+        )]
+        ws_url: String,
     },
 }
 
@@ -93,21 +109,28 @@ async fn main() -> Result<()> {
         .init();
 
     match args.command {
-        Some(Commands::Serve { channels }) => {
+        Some(Commands::Serve {
+            ws_bind_addr,
+            channels,
+        }) => {
             let channels: Vec<String> = channels
                 .into_iter()
                 .map(|c| c.trim().to_string())
                 .filter(|c| !c.is_empty())
                 .collect();
-            run_server(args.postgres_url, args.ws_url, channels).await?;
+            run_server(args.postgres_url, ws_bind_addr, channels).await?;
         }
 
-        Some(Commands::Listen { channels }) => {
-            run_listen(args.ws_url, channels).await?;
+        Some(Commands::Listen { ws_url, channels }) => {
+            run_listen(ws_url, channels).await?;
         }
 
-        Some(Commands::Publish { channel, payload }) => {
-            run_publish(args.ws_url, channel, payload).await?;
+        Some(Commands::Publish {
+            ws_url,
+            channel,
+            payload,
+        }) => {
+            run_publish(ws_url, channel, payload).await?;
         }
 
         None => {

@@ -21,5 +21,18 @@ services:
       timeout: 5s
       retries: 5
 
+  alle:
+    build: .
+    container_name: alle
+    environment:
+      POSTGRES_URL: "postgresql://postgres:postgres@postgres:5432/postgres"
+      WS_URL: "0.0.0.0:8080"
+      LOG_LEVEL: "alle=info,info"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres_data:
