@@ -1,45 +1,35 @@
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use std::collections::HashSet;
-use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 use tracing::{debug, error, info, warn};
 
-use crate::{
-    subscriptions::ClientId, subscriptions::SubscriptionManager, ClientMessage,
-    NotificationMessage, NotifyMessage, ServerMessage,
-};
+use crate::{bridge::PgNotifyEvent, ClientId, ClientMessage, NotificationMessage, ServerMessage};
 
 /// WebSocket server that handles client connections
 pub struct WebSocketServer {
     bind_addr: String,
-    incoming_tx: mpsc::UnboundedSender<NotifyMessage>,
-    subscription_manager: Arc<SubscriptionManager>,
+    pg_notify: UnboundedSender<PgNotifyEvent>,
+
+    next_client_id: u64,
 }
 
 impl WebSocketServer {
     /// Create a new WebSocket server
-    pub fn new(
-        bind_addr: String,
-        subscription_manager: Arc<SubscriptionManager>,
-    ) -> (Self, mpsc::UnboundedReceiver<NotifyMessage>) {
-        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
-
-        (
-            Self {
-                bind_addr,
-                incoming_tx,
-                subscription_manager,
-            },
-            incoming_rx,
-        )
+    pub fn new(bind_addr: String, pg_notify: UnboundedSender<PgNotifyEvent>) -> Self {
+        Self {
+            bind_addr,
+            pg_notify,
+            next_client_id: 0,
+        }
     }
 
     /// Start the WebSocket server
     pub async fn start(
-        self,
+        mut self,
         notification_rx: broadcast::Receiver<NotificationMessage>,
     ) -> Result<()> {
         let listener = TcpListener::bind(&self.bind_addr)
@@ -48,20 +38,18 @@ impl WebSocketServer {
 
         info!("WebSocket server listening on {}", self.bind_addr);
 
-        let incoming_tx = Arc::new(self.incoming_tx);
-        let subscription_manager = self.subscription_manager;
-
         loop {
             // Accept new WebSocket connections
             let (stream, addr) = listener.accept().await?;
             info!("New WebSocket connection from {}", addr);
 
-            let incoming_tx = Arc::clone(&incoming_tx);
-            let subscription_manager = Arc::clone(&subscription_manager);
             let notification_rx = notification_rx.resubscribe();
+            let client_id = self.next_client_id;
+            self.next_client_id += 1;
+            let pg_notify = self.pg_notify.clone();
 
             tokio::spawn(async move {
-                let mut client = match WebSocketClient::new(stream, subscription_manager).await {
+                let mut client = match WebSocketClient::new(client_id, stream, pg_notify).await {
                     Ok(client) => client,
                     Err(err) => {
                         error!("Error instanciating the connection to {}: {}", addr, err);
@@ -69,7 +57,7 @@ impl WebSocketServer {
                     }
                 };
 
-                if let Err(e) = client.handle_connection(notification_rx, incoming_tx).await {
+                if let Err(e) = client.handle_connection(notification_rx).await {
                     error!("Error handling connection from {}: {}", addr, e);
                 }
             });
@@ -81,43 +69,39 @@ struct WebSocketClient {
     channels: HashSet<String>,
     ws_stream: WebSocketStream<TcpStream>,
     client_id: ClientId,
-    subscription_manager: Arc<SubscriptionManager>,
+    pg_notify: UnboundedSender<PgNotifyEvent>,
 }
 
 impl WebSocketClient {
     async fn new(
+        client_id: ClientId,
         stream: TcpStream,
-        subscription_manager: Arc<SubscriptionManager>,
+        pg_notify: UnboundedSender<PgNotifyEvent>,
     ) -> Result<Self> {
         let ws_stream = accept_async(stream)
             .await
             .context("Failed to accept WebSocket connection")?;
 
-        let client_id = subscription_manager.register_client().await;
-
         Ok(Self {
             channels: HashSet::new(),
             ws_stream,
             client_id,
-            subscription_manager,
+            pg_notify,
         })
     }
     async fn handle_connection(
         &mut self,
         mut notification_rx: broadcast::Receiver<NotificationMessage>,
-        incoming_tx: Arc<mpsc::UnboundedSender<NotifyMessage>>,
     ) -> Result<()> {
         // Register this client with the subscription manager
         info!("Client {} connected", self.client_id);
 
-        let result = self
-            .handle_client_loop(&mut notification_rx, &incoming_tx)
-            .await;
+        let result = self.handle_client_loop(&mut notification_rx).await;
 
         // Clean up client subscriptions on disconnect
-        self.subscription_manager
-            .remove_client(self.client_id)
-            .await;
+        self.pg_notify.send(PgNotifyEvent::ClientDisconnect {
+            client_id: self.client_id,
+        })?;
         info!("Client {} disconnected", self.client_id);
 
         result
@@ -127,7 +111,6 @@ impl WebSocketClient {
     async fn handle_client_loop(
         &mut self,
         notification_rx: &mut broadcast::Receiver<NotificationMessage>,
-        incoming_tx: &Arc<mpsc::UnboundedSender<NotifyMessage>>,
     ) -> Result<()> {
         loop {
             tokio::select! {
@@ -165,12 +148,7 @@ impl WebSocketClient {
                 msg = self.ws_stream.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
-                            if let Err(e) = self.handle_client_message(
-                                &text,
-                                incoming_tx,
-                            )
-                            .await
-                            {
+                            if let Err(e) = self.handle_client_message( &text).await {
                                 error!("Error handling client {} message: {}", self.client_id, e);
                                 self.send(ServerMessage::Error {
                                     message: format!("Error: {}", e),
@@ -205,37 +183,34 @@ impl WebSocketClient {
     }
 
     /// Handle a message from a WebSocket client
-    async fn handle_client_message(
-        &mut self,
-        text: &str,
-        incoming_tx: &Arc<mpsc::UnboundedSender<NotifyMessage>>,
-    ) -> Result<()> {
+    async fn handle_client_message(&mut self, text: &str) -> Result<()> {
         let client_msg: ClientMessage =
             serde_json::from_str(text).context("Failed to parse client message")?;
 
         match client_msg {
             ClientMessage::Subscribe { channel } => {
                 self.channels.insert(channel.clone());
-                self.subscription_manager
-                    .subscribe(self.client_id, channel.clone())
-                    .await;
+                self.pg_notify.send(PgNotifyEvent::ChannelSubscribe {
+                    client_id: self.client_id,
+                    channel: channel.clone(),
+                })?;
 
                 self.send(ServerMessage::Subscribed { channel }).await?;
             }
 
             ClientMessage::Unsubscribe { channel } => {
                 self.channels.remove(&channel);
-                self.subscription_manager
-                    .unsubscribe(self.client_id, channel.clone())
-                    .await;
+                self.pg_notify.send(PgNotifyEvent::ChannelUnsubscribe {
+                    client_id: self.client_id,
+                    channel: channel.clone(),
+                })?;
 
                 self.send(ServerMessage::Unsubscribed { channel }).await?;
             }
 
             ClientMessage::Notify { channel, payload } => {
-                let notify_msg = NotifyMessage { channel, payload };
-                incoming_tx
-                    .send(notify_msg)
+                self.pg_notify
+                    .send(PgNotifyEvent::NotifyMessage { channel, payload })
                     .context("Failed to forward message to Postgres")?;
             }
         }

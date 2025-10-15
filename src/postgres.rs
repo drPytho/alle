@@ -1,3 +1,7 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use tokio::sync::broadcast;
@@ -38,6 +42,8 @@ fn validate_channel_name(channel: &str) -> Result<()> {
 pub struct PostgresListener {
     client: Client,
     notification_tx: broadcast::Sender<NotificationMessage>,
+
+    channels: Arc<RwLock<HashMap<String, HashSet<u64>>>>,
 }
 
 impl PostgresListener {
@@ -89,26 +95,81 @@ impl PostgresListener {
             Self {
                 client,
                 notification_tx,
+                channels: Arc::new(RwLock::new(HashMap::new())),
             },
             notification_rx,
         ))
     }
 
-    /// Subscribe to a channel (LISTEN)
-    pub async fn listen(&self, channel: &str) -> Result<()> {
-        validate_channel_name(channel)?;
+    pub async fn listen(&self, client_id: u64, channel: String) -> Result<()> {
+        validate_channel_name(&channel)?;
 
-        self.client
-            .execute(&format!("LISTEN {}", channel), &[])
-            .await
-            .context(format!("Failed to LISTEN on channel '{}'", channel))?;
+        let mut channels = self.channels.write().await;
+
+        let client_ids = channels.entry(channel.clone()).or_insert_with(HashSet::new);
+        if client_ids.is_empty() {
+            self.execute_listen(&channel).await?;
+        }
+        client_ids.insert(client_id);
 
         tracing::debug!("Listening on channel '{}'", channel);
         Ok(())
     }
 
+    pub async fn unlisten(&self, client_id: u64, channel: String) -> Result<()> {
+        validate_channel_name(&channel)?;
+
+        let mut channels = self.channels.write().await;
+
+        let client_ids = channels.entry(channel.clone()).or_insert_with(HashSet::new);
+        client_ids.remove(&client_id);
+        if client_ids.is_empty() {
+            self.execute_unlisten(&channel).await?;
+        }
+
+        tracing::debug!("Stopped listening on channel '{}'", channel);
+        Ok(())
+    }
+
+    pub async fn client_disconnect(&self, client_id: u64) -> Result<()> {
+        let mut channels = self.channels.write().await;
+
+        let vals = channels
+            .iter()
+            .filter_map(|(chan, set)| {
+                if set.contains(&client_id) {
+                    Some(chan.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<String>>();
+
+        // Remove client from each channel's subscriber list
+        for val in vals.into_iter() {
+            let client_ids = channels.entry(val.clone()).or_insert_with(HashSet::new);
+            client_ids.remove(&client_id);
+            if client_ids.is_empty() {
+                self.execute_unlisten(&val).await?;
+            }
+        }
+
+        tracing::info!("Removed client {}", client_id);
+
+        Ok(())
+    }
+
+    /// Subscribe to a channel (LISTEN)
+    async fn execute_listen(&self, channel: &str) -> Result<()> {
+        self.client
+            .execute(&format!("LISTEN {}", channel), &[])
+            .await
+            .context(format!("Failed to LISTEN on channel '{}'", channel))?;
+
+        Ok(())
+    }
     /// Unsubscribe from a channel (UNLISTEN)
-    pub async fn unlisten(&self, channel: &str) -> Result<()> {
+    async fn execute_unlisten(&self, channel: &str) -> Result<()> {
         validate_channel_name(channel)?;
 
         self.client
@@ -116,7 +177,6 @@ impl PostgresListener {
             .await
             .context(format!("Failed to UNLISTEN on channel '{}'", channel))?;
 
-        tracing::debug!("Stopped listening on channel '{}'", channel);
         Ok(())
     }
 
@@ -124,9 +184,9 @@ impl PostgresListener {
     pub async fn notify(&self, channel: &str, payload: &str) -> Result<()> {
         validate_channel_name(channel)?;
 
-        let query = format!("NOTIFY {}, '{}'", channel, payload.replace('\'', "''"));
+        let query = format!("NOTIFY {}, '$1'", channel);
         self.client
-            .execute(&query, &[])
+            .execute(&query, &[&payload])
             .await
             .context(format!("Failed to NOTIFY on channel '{}'", channel))?;
 

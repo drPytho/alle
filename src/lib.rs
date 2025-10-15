@@ -1,6 +1,5 @@
 pub mod bridge;
 pub mod postgres;
-pub mod subscriptions;
 pub mod websocket;
 
 pub use bridge::Bridge;
@@ -8,6 +7,8 @@ pub use postgres::PostgresListener;
 pub use websocket::WebSocketServer;
 
 use serde::{Deserialize, Serialize};
+
+type ClientId = u64;
 
 /// Message sent from Postgres NOTIFY to WebSocket clients
 #[derive(Debug, Clone, Serialize, Deserialize)]
