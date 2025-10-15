@@ -2,7 +2,6 @@ use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use tokio::sync::broadcast;
 use tokio_postgres::{AsyncMessage, Client, NoTls};
-use tracing::{debug, error, info};
 
 use crate::NotificationMessage;
 
@@ -51,7 +50,7 @@ impl PostgresListener {
             .await
             .context("Failed to connect to PostgreSQL")?;
 
-        info!("Connected to PostgreSQL");
+        tracing::info!("Connected to PostgreSQL");
 
         let (notification_tx, notification_rx) = broadcast::channel(buffer_size);
         let notification_tx_clone = notification_tx.clone();
@@ -67,18 +66,19 @@ impl PostgresListener {
                             channel: notif.channel().to_string(),
                             payload: notif.payload().to_string(),
                         };
-                        debug!(
+                        tracing::debug!(
                             "Received notification on channel '{}': {}",
-                            msg.channel, msg.payload
+                            msg.channel,
+                            msg.payload
                         );
 
                         if let Err(e) = notification_tx_clone.send(msg) {
-                            error!("Failed to broadcast notification: {}", e);
+                            tracing::error!("Failed to broadcast notification: {}", e);
                         }
                     }
                     Ok(_) => {}
                     Err(e) => {
-                        error!("PostgreSQL connection error: {}", e);
+                        tracing::error!("PostgreSQL connection error: {}", e);
                         break;
                     }
                 }
@@ -103,7 +103,7 @@ impl PostgresListener {
             .await
             .context(format!("Failed to LISTEN on channel '{}'", channel))?;
 
-        info!("Listening on channel '{}'", channel);
+        tracing::debug!("Listening on channel '{}'", channel);
         Ok(())
     }
 
@@ -116,7 +116,7 @@ impl PostgresListener {
             .await
             .context(format!("Failed to UNLISTEN on channel '{}'", channel))?;
 
-        info!("Stopped listening on channel '{}'", channel);
+        tracing::debug!("Stopped listening on channel '{}'", channel);
         Ok(())
     }
 
@@ -130,7 +130,7 @@ impl PostgresListener {
             .await
             .context(format!("Failed to NOTIFY on channel '{}'", channel))?;
 
-        debug!("Sent notification to channel '{}': {}", channel, payload);
+        tracing::debug!("Sent notification to channel '{}': {}", channel, payload);
         Ok(())
     }
 

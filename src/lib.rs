@@ -5,7 +5,6 @@ pub mod websocket;
 
 pub use bridge::Bridge;
 pub use postgres::PostgresListener;
-pub use subscriptions::SubscriptionManager;
 pub use websocket::WebSocketServer;
 
 use serde::{Deserialize, Serialize};

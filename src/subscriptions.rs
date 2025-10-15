@@ -54,7 +54,7 @@ pub struct SubscriptionManager {
 
 impl SubscriptionManager {
     /// Create a new subscription manager
-    pub fn new() -> (Self, mpsc::UnboundedReceiver<SubscriptionEvent>) {
+    pub(crate) fn new() -> (Self, mpsc::UnboundedReceiver<SubscriptionEvent>) {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         (
@@ -69,7 +69,7 @@ impl SubscriptionManager {
     }
 
     /// Register a new client and get their unique ID
-    pub async fn register_client(&self) -> ClientId {
+    pub(crate) async fn register_client(&self) -> ClientId {
         let mut next_id = self.next_client_id.write().await;
         let client_id = *next_id;
         *next_id += 1;
@@ -85,7 +85,7 @@ impl SubscriptionManager {
     }
 
     /// Subscribe a client to a channel
-    pub async fn subscribe(&self, client_id: ClientId, channel: String) -> bool {
+    pub(crate) async fn subscribe(&self, client_id: ClientId, channel: String) -> bool {
         let mut client_channels = self.client_channels.write().await;
         let mut channel_clients = self.channel_clients.write().await;
 
@@ -127,7 +127,7 @@ impl SubscriptionManager {
     }
 
     /// Unsubscribe a client from a channel
-    pub async fn unsubscribe(&self, client_id: ClientId, channel: String) -> bool {
+    pub(crate) async fn unsubscribe(&self, client_id: ClientId, channel: String) -> bool {
         let mut client_channels = self.client_channels.write().await;
         let mut channel_clients = self.channel_clients.write().await;
 
@@ -172,7 +172,7 @@ impl SubscriptionManager {
     }
 
     /// Remove all subscriptions for a client (called on disconnect)
-    pub async fn remove_client(&self, client_id: ClientId) {
+    pub(crate) async fn remove_client(&self, client_id: ClientId) {
         let mut client_channels = self.client_channels.write().await;
         let mut channel_clients = self.channel_clients.write().await;
 
@@ -205,46 +205,6 @@ impl SubscriptionManager {
         }
 
         info!("Removed client {}", client_id);
-    }
-
-    /// Get all channels a client is subscribed to
-    pub async fn get_client_channels(&self, client_id: ClientId) -> HashSet<String> {
-        self.client_channels
-            .read()
-            .await
-            .get(&client_id)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    /// Check if a client is subscribed to a channel
-    pub async fn is_subscribed(&self, client_id: ClientId, channel: &str) -> bool {
-        self.client_channels
-            .read()
-            .await
-            .get(&client_id)
-            .map(|channels| channels.contains(channel))
-            .unwrap_or(false)
-    }
-
-    /// Get all clients subscribed to a channel
-    pub async fn get_channel_clients(&self, channel: &str) -> HashSet<ClientId> {
-        self.channel_clients
-            .read()
-            .await
-            .get(channel)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    /// Get the total number of active channels
-    pub async fn active_channel_count(&self) -> usize {
-        self.channel_clients.read().await.len()
-    }
-
-    /// Get all active channels
-    pub async fn get_active_channels(&self) -> Vec<String> {
-        self.channel_clients.read().await.keys().cloned().collect()
     }
 }
 

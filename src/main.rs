@@ -135,6 +135,7 @@ async fn main() -> Result<()> {
 
         None => {
             // Default command: start the bridge server with defaults
+            run_server(args.postgres_url, "0.0.0.0:8080".into(), Vec::new()).await?;
         }
     }
 
@@ -150,6 +151,7 @@ async fn run_server(
     tracing::info!("Starting Alle WebSocket-Postgres bridge");
     tracing::info!("PostgreSQL: {}", postgres_url);
     tracing::info!("WebSocket: {}", ws_bind_addr);
+
     if !channels.is_empty() {
         tracing::info!("Initial channels: {}", channels.join(", "));
     } else {
