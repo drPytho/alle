@@ -1,10 +1,39 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use tokio::sync::broadcast;
 use tokio_postgres::{AsyncMessage, Client, NoTls};
 use tracing::{debug, error, info};
 
 use crate::NotificationMessage;
+
+/// Validate channel name to prevent SQL injection
+/// Only allows alphanumeric characters and underscores, must start with letter or underscore
+fn validate_channel_name(channel: &str) -> Result<()> {
+    if channel.is_empty() {
+        return Err(anyhow!("Channel name cannot be empty"));
+    }
+
+    if channel.len() > 63 {
+        return Err(anyhow!("Channel name too long (max 63 characters)"));
+    }
+
+    let first_char = channel.chars().next().unwrap();
+    if !first_char.is_ascii_alphabetic() && first_char != '_' {
+        return Err(anyhow!(
+            "Channel name must start with a letter or underscore"
+        ));
+    }
+
+    for ch in channel.chars() {
+        if !ch.is_ascii_alphanumeric() && ch != '_' {
+            return Err(anyhow!(
+                "Channel name can only contain letters, numbers, and underscores"
+            ));
+        }
+    }
+
+    Ok(())
+}
 
 /// PostgreSQL LISTEN/NOTIFY client
 pub struct PostgresListener {
@@ -67,6 +96,8 @@ impl PostgresListener {
 
     /// Subscribe to a channel (LISTEN)
     pub async fn listen(&self, channel: &str) -> Result<()> {
+        validate_channel_name(channel)?;
+
         self.client
             .execute(&format!("LISTEN {}", channel), &[])
             .await
@@ -78,6 +109,8 @@ impl PostgresListener {
 
     /// Unsubscribe from a channel (UNLISTEN)
     pub async fn unlisten(&self, channel: &str) -> Result<()> {
+        validate_channel_name(channel)?;
+
         self.client
             .execute(&format!("UNLISTEN {}", channel), &[])
             .await
@@ -89,6 +122,8 @@ impl PostgresListener {
 
     /// Send a notification to a channel (NOTIFY)
     pub async fn notify(&self, channel: &str, payload: &str) -> Result<()> {
+        validate_channel_name(channel)?;
+
         let query = format!("NOTIFY {}, '{}'", channel, payload.replace('\'', "''"));
         self.client
             .execute(&query, &[])

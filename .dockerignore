@@ -1,0 +1,29 @@
+# Build artifacts
+target/
+*.o
+*.so
+*.a
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Documentation
+README.md
+TESTING.md
+*.md
+
+# Testing
+test-setup.sh
+docker-compose.yml
+
+# Other
+.env
+*.log
