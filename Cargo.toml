@@ -22,3 +22,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
+tokio-stream = { version = "0.1.17", features = ["sync"] }
+axum = "0.8.6"
+tiny_http = "0.12.0"
+pin-project = "1.1.10"

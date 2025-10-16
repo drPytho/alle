@@ -1,4 +1,4 @@
-use alle::{Bridge, BridgeConfig, ClientMessage, ServerMessage};
+use alle::{Bridge, BridgeConfig, ClientMessage, Frontend, ServerMessage};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use futures::{SinkExt, StreamExt};
@@ -55,9 +55,17 @@ enum Commands {
             short = 'w',
             long,
             env = "WS_BIND_ADDR",
-            default_value = "127.0.0.1:8080"
+            default_value = None,
         )]
-        ws_bind_addr: String,
+        ws_bind_addr: Option<String>,
+
+        #[arg(
+            short = 's',
+            long,
+            env = "SE_BIND_ADDR",
+            default_value = None,
+        )]
+        se_bind_addr: Option<String>,
     },
 
     /// Listen to channels via WebSocket connection
@@ -111,6 +119,7 @@ async fn main() -> Result<()> {
     match args.command {
         Some(Commands::Serve {
             ws_bind_addr,
+            se_bind_addr,
             channels,
         }) => {
             let channels: Vec<String> = channels
@@ -118,7 +127,21 @@ async fn main() -> Result<()> {
                 .map(|c| c.trim().to_string())
                 .filter(|c| !c.is_empty())
                 .collect();
-            run_server(args.postgres_url, ws_bind_addr, channels).await?;
+            if let Some(bind_addr) = ws_bind_addr {
+                run_server(
+                    args.postgres_url,
+                    Frontend::WebSocket { bind_addr },
+                    channels,
+                )
+                .await?;
+            } else if let Some(bind_addr) = se_bind_addr {
+                run_server(
+                    args.postgres_url,
+                    Frontend::ServerPush { bind_addr },
+                    channels,
+                )
+                .await?;
+            }
         }
 
         Some(Commands::Listen { ws_url, channels }) => {
@@ -135,7 +158,14 @@ async fn main() -> Result<()> {
 
         None => {
             // Default command: start the bridge server with defaults
-            run_server(args.postgres_url, "0.0.0.0:8080".into(), Vec::new()).await?;
+            run_server(
+                args.postgres_url,
+                Frontend::ServerPush {
+                    bind_addr: "0.0.0.0:8080".into(),
+                },
+                Vec::new(),
+            )
+            .await?;
         }
     }
 
@@ -145,12 +175,12 @@ async fn main() -> Result<()> {
 /// Run the WebSocket bridge server
 async fn run_server(
     postgres_url: String,
-    ws_bind_addr: String,
+    bind_addr: Frontend,
     channels: Vec<String>,
 ) -> Result<()> {
     tracing::info!("Starting Alle WebSocket-Postgres bridge");
     tracing::info!("PostgreSQL: {}", postgres_url);
-    tracing::info!("WebSocket: {}", ws_bind_addr);
+    tracing::info!("WebSocket: {:?}", bind_addr);
 
     if !channels.is_empty() {
         tracing::info!("Initial channels: {}", channels.join(", "));
@@ -158,7 +188,7 @@ async fn run_server(
         tracing::info!("No initial channels - clients will subscribe dynamically");
     }
 
-    let config = BridgeConfig::new(postgres_url, ws_bind_addr).with_channels(channels);
+    let config = BridgeConfig::new(postgres_url, bind_addr).with_channels(channels);
     let bridge = Bridge::new(config);
     bridge.run().await?;
 

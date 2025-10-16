@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::info;
 
-use crate::{BridgeConfig, PostgresListener, WebSocketServer};
+use crate::{server_push::server, BridgeConfig, Frontend, PostgresListener, WebSocketServer};
 
 /// Main bridge that connects Postgres NOTIFY with WebSocket clients
 pub struct Bridge {
@@ -97,11 +97,21 @@ impl Bridge {
             }
         });
 
-        // Create WebSocket server
-        let ws_server = WebSocketServer::new(self.config.ws_bind_addr.clone(), pg_event_tx.clone());
+        match self.config.frontend {
+            Frontend::WebSocket { bind_addr } => {
+                info!("websocker path");
+                let ws_server = WebSocketServer::new(bind_addr, pg_event_tx.clone());
 
-        // Start WebSocket server (this forwards Postgres notifications to clients)
-        ws_server.start(notification_rx).await?;
+                // Start WebSocket server (this forwards Postgres notifications to clients)
+                ws_server.start(notification_rx).await?;
+            }
+            Frontend::ServerPush { bind_addr } => {
+                info!("Server push path");
+                if let Err(e) = server(bind_addr, pg_event_tx.clone(), notification_rx).await {
+                    panic!("{}", e);
+                }
+            }
+        }
 
         Ok(())
     }

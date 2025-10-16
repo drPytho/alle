@@ -17,11 +17,11 @@ A Rust library and deployable binary that bridges WebSockets and PostgreSQL NOTI
 ## Architecture
 
 ```
-┌──────────────┐         ┌─────────────────┐         ┌──────────────────┐
-│  PostgreSQL  │ NOTIFY  │  Bridge         │ WS      │  WebSocket       │
-│  Database    │◄────────┤  + Subscription ├────────►│  Clients         │
-│              │ LISTEN  │    Manager      │         │  (Per-channel)   │
-└──────────────┘         └─────────────────┘         └──────────────────┘
+┌──────────────┐         ┌─────────────────┐           ┌──────────────────┐
+│  PostgreSQL  │ NOTIFY  │                 │ WebSocket │                  |
+│  Database    │◄────────┤  Bridge         ├──--──────►│  Clients         │
+│              │ LISTEN  │    Manager      │           │  (Per-channel)   │
+└──────────────┘         └─────────────────┘           └──────────────────┘
 ```
 
 ### Dynamic Subscription System

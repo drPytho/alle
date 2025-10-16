@@ -1,5 +1,7 @@
 pub mod bridge;
+mod drop_stream;
 pub mod postgres;
+pub mod server_push;
 pub mod websocket;
 
 pub use bridge::Bridge;
@@ -50,6 +52,12 @@ pub enum ServerMessage {
     Error { message: String },
 }
 
+#[derive(Debug, Clone)]
+pub enum Frontend {
+    WebSocket { bind_addr: String },
+    ServerPush { bind_addr: String },
+}
+
 /// Configuration for the bridge
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
@@ -57,17 +65,17 @@ pub struct BridgeConfig {
     pub postgres_url: String,
 
     /// WebSocket server bind address
-    pub ws_bind_addr: String,
+    pub frontend: Frontend,
 
     /// Channels to listen to on Postgres
     pub listen_channels: Vec<String>,
 }
 
 impl BridgeConfig {
-    pub fn new(postgres_url: String, ws_bind_addr: String) -> Self {
+    pub fn new(postgres_url: String, frontend: Frontend) -> Self {
         Self {
             postgres_url,
-            ws_bind_addr,
+            frontend,
             listen_channels: Vec::new(),
         }
     }
