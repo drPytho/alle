@@ -55,12 +55,26 @@ impl PostgresListener {
                             msg.payload
                         );
 
-                        let set = channel_map.read().await;
+                        let channel_map_guard = channel_map.read().await;
 
-                        if let Some(set) = set.get(&channel) {
-                            for chan in set.values() {
+                        if let Some(set) = channel_map_guard.get(&channel) {
+                            let mut dead_ids = Vec::new();
+
+                            for (id, chan) in set.iter() {
                                 if let Err(e) = chan.send(msg.clone()).await {
-                                    tracing::error!("Failed to broadcast notification: {}", e);
+                                    tracing::warn!("Receiver {} disconnected: {}", id, e);
+                                    dead_ids.push(*id);
+                                }
+                            }
+
+                            drop(channel_map_guard); // Release read lock
+
+                            if !dead_ids.is_empty() {
+                                let mut channel_map_guard = channel_map.write().await;
+                                if let Some(set) = channel_map_guard.get_mut(&channel) {
+                                    for id in dead_ids {
+                                        set.remove(&id);
+                                    }
                                 }
                             }
                         }
@@ -91,7 +105,6 @@ impl PostgresListener {
         }
         client_ids.insert(client_id, chan);
 
-        tracing::debug!("Listening on channel '{}'", channel);
         Ok(())
     }
 
@@ -104,7 +117,6 @@ impl PostgresListener {
             self.execute_unlisten(&channel).await?;
         }
 
-        tracing::debug!("Stopped listening on channel '{}'", channel);
         Ok(())
     }
 
@@ -115,6 +127,7 @@ impl PostgresListener {
             .await
             .context(format!("Failed to LISTEN on channel '{}'", channel))?;
 
+        tracing::debug!("Listening on channel '{}'", channel);
         Ok(())
     }
     /// Unsubscribe from a channel (UNLISTEN)
@@ -124,6 +137,7 @@ impl PostgresListener {
             .await
             .context(format!("Failed to UNLISTEN on channel '{}'", channel))?;
 
+        tracing::debug!("Stopped listening on channel '{}'", channel);
         Ok(())
     }
 
