@@ -135,7 +135,10 @@ pub enum ClientMessage {
     /// Unsubscribe from a channel
     Unsubscribe { channel: ChannelName },
     /// Send a NOTIFY to Postgres
-    Notify { channel: ChannelName, payload: String },
+    Notify {
+        channel: ChannelName,
+        payload: String,
+    },
 }
 
 /// Messages from server to WebSocket clients
@@ -143,7 +146,10 @@ pub enum ClientMessage {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
     /// Notification from Postgres
-    Notification { channel: ChannelName, payload: String },
+    Notification {
+        channel: ChannelName,
+        payload: String,
+    },
     /// Subscription confirmed
     Subscribed { channel: ChannelName },
     /// Unsubscription confirmed

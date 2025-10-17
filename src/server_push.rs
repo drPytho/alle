@@ -7,18 +7,17 @@ use axum::{
 use futures::stream::Stream;
 use std::{convert::Infallible, sync::atomic::AtomicU64};
 use std::{sync::Arc, time::Duration};
-use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::{net::TcpListener, sync::broadcast};
 
 use crate::{bridge::PgNotifyEvent, drop_stream::DropStream, ChannelName, NotificationMessage};
 
 pub struct HttpPushServerState {
     pg_notify: UnboundedSender<PgNotifyEvent>,
-    notify: broadcast::Receiver<NotificationMessage>,
     client_id_counter: Arc<AtomicU64>,
 }
 
@@ -26,24 +25,18 @@ impl Clone for HttpPushServerState {
     fn clone(&self) -> Self {
         HttpPushServerState {
             pg_notify: self.pg_notify.clone(),
-            notify: self.notify.resubscribe(),
             client_id_counter: self.client_id_counter.clone(),
         }
     }
 }
 
-pub async fn server(
-    bind_addr: String,
-    pg_notify: UnboundedSender<PgNotifyEvent>,
-    notify: broadcast::Receiver<NotificationMessage>,
-) -> Result<()> {
+pub async fn server(bind_addr: String, pg_notify: UnboundedSender<PgNotifyEvent>) -> Result<()> {
     let listener = TcpListener::bind(bind_addr)
         .await
         .expect("We should be able to bind out server to addr");
 
     let state = HttpPushServerState {
         pg_notify,
-        notify,
         client_id_counter: Arc::new(AtomicU64::new(0)),
     };
 
@@ -84,6 +77,7 @@ async fn sse_handler(
     channels: Query<Channels>,
     State(state): State<HttpPushServerState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let (sender, receiver) = tokio::sync::mpsc::channel(32);
     let client_id = state
         .client_id_counter
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -108,34 +102,23 @@ async fn sse_handler(
             .send(PgNotifyEvent::ChannelSubscribe {
                 client_id,
                 channel: ch.clone(),
+                chan: sender.clone(),
             })
             .expect("Should be able to send message");
     }
 
     let drop_channels = filter_channels.clone();
-    let stream = BroadcastStream::new(state.notify).filter_map(move |v| {
-        match v {
-            Ok(NotificationMessage { channel, payload }) => {
-                if filter_channels.contains(&channel) {
-                    let message = EventMessage {
-                        channel,
-                        payload,
-                    };
-                    let json_data = serde_json::to_string(&message)
-                        .expect("Failed to serialize event message");
-                    let event = Event::default()
-                        .data(json_data)
-                        .event("message");
 
-                    Some(Ok(event))
-                } else {
-                    None
-                }
-            }
+    let stream = ReceiverStream::new(receiver).filter_map(
+        move |NotificationMessage { channel, payload }| {
+            let message = EventMessage { channel, payload };
+            let json_data =
+                serde_json::to_string(&message).expect("Failed to serialize event message");
+            let event = Event::default().data(json_data).event("message");
 
-            Err(_e) => None,
-        }
-    });
+            Some(Ok(event))
+        },
+    );
 
     let stream = DropStream::new(stream, move || {
         for ch in drop_channels {

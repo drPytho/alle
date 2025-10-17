@@ -1,9 +1,12 @@
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, Sender};
 use tracing::info;
 
-use crate::{server_push::server, BridgeConfig, ChannelName, Frontend, PostgresListener, WebSocketServer};
+use crate::{
+    server_push::server, BridgeConfig, ChannelName, Frontend, NotificationMessage,
+    PostgresListener, WebSocketServer,
+};
 
 /// Main bridge that connects Postgres NOTIFY with WebSocket clients
 pub struct Bridge {
@@ -16,6 +19,7 @@ pub enum PgNotifyEvent {
     ChannelSubscribe {
         client_id: u64,
         channel: ChannelName,
+        chan: Sender<NotificationMessage>,
     },
     /// A channel is no longer needed (last subscriber left)
     ChannelUnsubscribe {
@@ -50,8 +54,7 @@ impl Bridge {
         info!("Starting bridge with dynamic subscription management");
 
         // Connect to PostgreSQL
-        let (pg_listener, notification_rx) =
-            PostgresListener::connect(&self.config.postgres_url, 1000).await?;
+        let pg_listener = PostgresListener::connect(&self.config.postgres_url).await?;
         let pg_listener = Arc::new(pg_listener);
 
         // Create subscription manager
@@ -64,10 +67,14 @@ impl Bridge {
             while let Some(event) = pg_event_rx.recv().await {
                 // TODO: This contains a race condition
                 match event {
-                    PgNotifyEvent::ChannelSubscribe { client_id, channel } => {
+                    PgNotifyEvent::ChannelSubscribe {
+                        client_id,
+                        channel,
+                        chan,
+                    } => {
                         info!("First subscriber to '{}', issuing LISTEN", channel);
                         if let Err(e) = pg_listener_for_events
-                            .listen(client_id, channel.clone())
+                            .listen(client_id, channel.clone(), chan)
                             .await
                         {
                             tracing::error!("Failed to LISTEN on channel '{}': {}", channel, e);
@@ -103,11 +110,11 @@ impl Bridge {
                 let ws_server = WebSocketServer::new(bind_addr, pg_event_tx.clone());
 
                 // Start WebSocket server (this forwards Postgres notifications to clients)
-                ws_server.start(notification_rx).await?;
+                ws_server.start().await?;
             }
             Frontend::ServerPush { bind_addr } => {
                 info!("Server push path");
-                if let Err(e) = server(bind_addr, pg_event_tx.clone(), notification_rx).await {
+                if let Err(e) = server(bind_addr, pg_event_tx.clone()).await {
                     panic!("{}", e);
                 }
             }

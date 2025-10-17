@@ -1,38 +1,35 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc::Sender, RwLock};
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use tokio::sync::broadcast;
 use tokio_postgres::{AsyncMessage, Client, NoTls};
 
 use crate::{ChannelName, NotificationMessage};
 
+type ChannelsMap = HashMap<ChannelName, HashMap<u64, Sender<NotificationMessage>>>;
+
 /// PostgreSQL LISTEN/NOTIFY client
 pub struct PostgresListener {
     client: Client,
-    notification_tx: broadcast::Sender<NotificationMessage>,
 
-    channels: Arc<RwLock<HashMap<ChannelName, HashSet<u64>>>>,
+    channels: Arc<RwLock<ChannelsMap>>,
 }
 
 impl PostgresListener {
     /// Create a new PostgreSQL listener
-    pub async fn connect(
-        postgres_url: &str,
-        buffer_size: usize,
-    ) -> Result<(Self, broadcast::Receiver<NotificationMessage>)> {
+    pub async fn connect(postgres_url: &str) -> Result<Self> {
         let (client, mut connection) = tokio_postgres::connect(postgres_url, NoTls)
             .await
             .context("Failed to connect to PostgreSQL")?;
 
         tracing::info!("Connected to PostgreSQL");
 
-        let (notification_tx, notification_rx) = broadcast::channel(buffer_size);
-        let notification_tx_clone = notification_tx.clone();
-
+        let channels: Arc<RwLock<ChannelsMap>> = Arc::new(RwLock::new(HashMap::new()));
         // Spawn a task to handle connection and notifications
+        let channel_map = channels.clone();
+
         tokio::spawn(async move {
             let mut stream = futures::stream::poll_fn(move |cx| connection.poll_message(cx));
 
@@ -58,8 +55,14 @@ impl PostgresListener {
                             msg.payload
                         );
 
-                        if let Err(e) = notification_tx_clone.send(msg) {
-                            tracing::error!("Failed to broadcast notification: {}", e);
+                        let set = channel_map.read().await;
+
+                        if let Some(set) = set.get(&channel) {
+                            for chan in set.values() {
+                                if let Err(e) = chan.send(msg.clone()).await {
+                                    tracing::error!("Failed to broadcast notification: {}", e);
+                                }
+                            }
                         }
                     }
                     Ok(_) => {}
@@ -71,24 +74,22 @@ impl PostgresListener {
             }
         });
 
-        Ok((
-            Self {
-                client,
-                notification_tx,
-                channels: Arc::new(RwLock::new(HashMap::new())),
-            },
-            notification_rx,
-        ))
+        Ok(Self { client, channels })
     }
 
-    pub async fn listen(&self, client_id: u64, channel: ChannelName) -> Result<()> {
+    pub async fn listen(
+        &self,
+        client_id: u64,
+        channel: ChannelName,
+        chan: Sender<NotificationMessage>,
+    ) -> Result<()> {
         let mut channels = self.channels.write().await;
 
-        let client_ids = channels.entry(channel.clone()).or_insert_with(HashSet::new);
+        let client_ids = channels.entry(channel.clone()).or_insert_with(HashMap::new);
         if client_ids.is_empty() {
             self.execute_listen(&channel).await?;
         }
-        client_ids.insert(client_id);
+        client_ids.insert(client_id, chan);
 
         tracing::debug!("Listening on channel '{}'", channel);
         Ok(())
@@ -97,41 +98,13 @@ impl PostgresListener {
     pub async fn unlisten(&self, client_id: u64, channel: ChannelName) -> Result<()> {
         let mut channels = self.channels.write().await;
 
-        let client_ids = channels.entry(channel.clone()).or_insert_with(HashSet::new);
+        let client_ids = channels.entry(channel.clone()).or_insert_with(HashMap::new);
         client_ids.remove(&client_id);
         if client_ids.is_empty() {
             self.execute_unlisten(&channel).await?;
         }
 
         tracing::debug!("Stopped listening on channel '{}'", channel);
-        Ok(())
-    }
-
-    pub async fn client_disconnect(&self, client_id: u64) -> Result<()> {
-        let mut channels = self.channels.write().await;
-
-        let vals = channels
-            .iter()
-            .filter_map(|(chan, set)| {
-                if set.contains(&client_id) {
-                    Some(chan.clone())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<ChannelName>>();
-
-        // Remove client from each channel's subscriber list
-        for val in vals.into_iter() {
-            let client_ids = channels.entry(val.clone()).or_insert_with(HashSet::new);
-            client_ids.remove(&client_id);
-            if client_ids.is_empty() {
-                self.execute_unlisten(&val).await?;
-            }
-        }
-
-        tracing::info!("Removed client {}", client_id);
-
         Ok(())
     }
 
@@ -169,10 +142,5 @@ impl PostgresListener {
 
         tracing::debug!("Sent notification to channel '{}': {}", channel, payload);
         Ok(())
-    }
-
-    /// Get a new receiver for notifications
-    pub fn subscribe(&self) -> broadcast::Receiver<NotificationMessage> {
-        self.notification_tx.subscribe()
     }
 }

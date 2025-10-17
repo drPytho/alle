@@ -2,12 +2,15 @@ use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use std::collections::HashSet;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::{Sender, UnboundedSender};
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 use tracing::{debug, error, info, warn};
 
-use crate::{bridge::PgNotifyEvent, ChannelName, ClientId, ClientMessage, NotificationMessage, ServerMessage};
+use crate::{
+    bridge::PgNotifyEvent, ChannelName, ClientId, ClientMessage, NotificationMessage, ServerMessage,
+};
 
 /// WebSocket server that handles client connections
 pub struct WebSocketServer {
@@ -28,10 +31,7 @@ impl WebSocketServer {
     }
 
     /// Start the WebSocket server
-    pub async fn start(
-        mut self,
-        notification_rx: broadcast::Receiver<NotificationMessage>,
-    ) -> Result<()> {
+    pub async fn start(mut self) -> Result<()> {
         let listener = TcpListener::bind(&self.bind_addr)
             .await
             .context(format!("Failed to bind to {}", self.bind_addr))?;
@@ -43,7 +43,6 @@ impl WebSocketServer {
             let (stream, addr) = listener.accept().await?;
             info!("New WebSocket connection from {}", addr);
 
-            let notification_rx = notification_rx.resubscribe();
             let client_id = self.next_client_id;
             self.next_client_id += 1;
             let pg_notify = self.pg_notify.clone();
@@ -57,7 +56,7 @@ impl WebSocketServer {
                     }
                 };
 
-                if let Err(e) = client.handle_connection(notification_rx).await {
+                if let Err(e) = client.handle_connection().await {
                     error!("Error handling connection from {}: {}", addr, e);
                 }
             });
@@ -89,14 +88,11 @@ impl WebSocketClient {
             pg_notify,
         })
     }
-    async fn handle_connection(
-        &mut self,
-        mut notification_rx: broadcast::Receiver<NotificationMessage>,
-    ) -> Result<()> {
+    async fn handle_connection(&mut self) -> Result<()> {
         // Register this client with the subscription manager
         info!("Client {} connected", self.client_id);
 
-        let result = self.handle_client_loop(&mut notification_rx).await;
+        let result = self.handle_client_loop().await;
 
         // Clean up client subscriptions on disconnect
         self.pg_notify.send(PgNotifyEvent::ClientDisconnect {
@@ -108,16 +104,16 @@ impl WebSocketClient {
     }
 
     /// Main client loop handling messages
-    async fn handle_client_loop(
-        &mut self,
-        notification_rx: &mut broadcast::Receiver<NotificationMessage>,
-    ) -> Result<()> {
+    async fn handle_client_loop(&mut self) -> Result<()> {
+        let (sender, receiver) = mpsc::channel::<NotificationMessage>(32);
+        let mut rece = ReceiverStream::new(receiver);
         loop {
             tokio::select! {
                 // Receive messages from Postgres and send to WebSocket client (if subscribed)
-                msg = notification_rx.recv() => {
+                msg = rece.next() => {
                     match msg {
-                        Ok(notif) => {
+                        Some(notif) => {
+
                             // Only send if client is subscribed to this channel
                             if !self.channels.contains(&notif.channel) {
                                 continue;
@@ -131,16 +127,10 @@ impl WebSocketClient {
                                 break;
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            warn!("Client {} lagged behind by {} messages", self.client_id, n);
-                            self.send(ServerMessage::Error {
-                                message: format!("Lagged behind by {} messages", n),
-                            }).await?;
+                        None => {
+                                warn!("We got an empty message");
                         }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            debug!("Notification channel closed");
-                            break;
-                        }
+
                     }
                 }
 
@@ -148,7 +138,7 @@ impl WebSocketClient {
                 msg = self.ws_stream.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
-                            if let Err(e) = self.handle_client_message( &text).await {
+                            if let Err(e) = self.handle_client_message(&text, &sender).await {
                                 error!("Error handling client {} message: {}", self.client_id, e);
                                 self.send(ServerMessage::Error {
                                     message: format!("Error: {}", e),
@@ -183,7 +173,11 @@ impl WebSocketClient {
     }
 
     /// Handle a message from a WebSocket client
-    async fn handle_client_message(&mut self, text: &str) -> Result<()> {
+    async fn handle_client_message(
+        &mut self,
+        text: &str,
+        chan: &Sender<NotificationMessage>,
+    ) -> Result<()> {
         let client_msg: ClientMessage =
             serde_json::from_str(text).context("Failed to parse client message")?;
 
@@ -193,6 +187,7 @@ impl WebSocketClient {
                 self.pg_notify.send(PgNotifyEvent::ChannelSubscribe {
                     client_id: self.client_id,
                     channel: channel.clone(),
+                    chan: chan.clone(),
                 })?;
 
                 self.send(ServerMessage::Subscribed { channel }).await?;
