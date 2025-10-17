@@ -26,7 +26,7 @@ def listen_to_sse(url: str, channel: str):
     """
     import requests
 
-    endpoint = f"{url}/events/{channel}"
+    endpoint = f"{url}/events?channels={channel}"
     print(f"Connecting to SSE endpoint: {endpoint}")
     print(f"Listening to channel: {channel}")
     print("Press Ctrl+C to stop\n")

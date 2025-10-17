@@ -1,8 +1,9 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Query, State},
+    http::StatusCode,
     response::sse::{Event, Sse},
-    routing::get,
-    Router,
+    routing::{get, post},
+    Json, Router,
 };
 use futures::stream::Stream;
 use std::{convert::Infallible, sync::atomic::AtomicU64};
@@ -10,6 +11,7 @@ use std::{sync::Arc, time::Duration};
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 
 use anyhow::Result;
+use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::{net::TcpListener, sync::broadcast};
 
@@ -47,39 +49,59 @@ pub async fn server(
     };
 
     let app = Router::new()
-        .route("/events/{channel}", get(sse_handler))
+        .route("/events", get(sse_handler))
+        .route("/notify", post(notify_handler))
         .with_state(state);
 
     axum::serve(listener, app).await.unwrap();
 
     Ok(())
 }
+#[derive(Deserialize)]
+struct Channels {
+    channels: String,
+}
+
+#[derive(Deserialize)]
+struct NotifyRequest {
+    channel: String,
+    payload: String,
+}
 
 async fn sse_handler(
-    Path(channel): Path<String>,
+    channels: Query<Channels>,
     State(state): State<HttpPushServerState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let client_id = state
         .client_id_counter
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    state
-        .pg_notify
-        .send(PgNotifyEvent::ChannelSubscribe {
-            client_id,
-            channel: channel.clone(),
-        })
-        .expect("Should be able to send message");
+    let channels: Vec<&str> = channels.channels.split(",").collect();
+    for ch in channels.iter() {
+        state
+            .pg_notify
+            .send(PgNotifyEvent::ChannelSubscribe {
+                client_id,
+                channel: ch.to_string(),
+            })
+            .expect("Should be able to send message");
+    }
 
     // Create guard that will send unsubscribe on drop
 
-    let filter_channel = channel.clone();
+    let filter_channels: Vec<String> = channels.into_iter().map(|s| s.to_string()).collect();
+    let drop_channels = filter_channels.clone();
     let stream = BroadcastStream::new(state.notify).filter_map(move |v| {
         // Keep guard alive by cloning Arc into closure
 
         match v {
             Ok(NotificationMessage { channel, payload }) => {
-                if channel == filter_channel {
-                    let event = Event::default().data(payload).event("message");
+                if filter_channels.contains(&channel) {
+                    let event = Event::default()
+                        .data(format!(
+                            r#"{{"channel":"{}","payload":"{}"}}"#,
+                            channel, payload
+                        ))
+                        .event("message");
 
                     Some(Ok(event))
                 } else {
@@ -92,10 +114,15 @@ async fn sse_handler(
     });
 
     let stream = DropStream::new(stream, move || {
-        state
-            .pg_notify
-            .send(PgNotifyEvent::ChannelUnsubscribe { client_id, channel })
-            .expect("should not fail to send here");
+        for ch in drop_channels {
+            state
+                .pg_notify
+                .send(PgNotifyEvent::ChannelUnsubscribe {
+                    client_id,
+                    channel: ch.to_string(),
+                })
+                .expect("Should be able to send message");
+        }
     });
 
     Sse::new(stream).keep_alive(
@@ -103,4 +130,17 @@ async fn sse_handler(
             .interval(Duration::from_secs(30))
             .text("keep-alive"),
     )
+}
+
+async fn notify_handler(
+    State(state): State<HttpPushServerState>,
+    Json(request): Json<NotifyRequest>,
+) -> StatusCode {
+    match state.pg_notify.send(PgNotifyEvent::NotifyMessage {
+        channel: request.channel,
+        payload: request.payload,
+    }) {
+        Ok(_) => StatusCode::OK,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
