@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::info;
 
-use crate::{server_push::server, BridgeConfig, Frontend, PostgresListener, WebSocketServer};
+use crate::{server_push::server, BridgeConfig, ChannelName, Frontend, PostgresListener, WebSocketServer};
 
 /// Main bridge that connects Postgres NOTIFY with WebSocket clients
 pub struct Bridge {
@@ -15,12 +15,12 @@ pub enum PgNotifyEvent {
     /// A channel needs to be listened to (first subscriber)
     ChannelSubscribe {
         client_id: u64,
-        channel: String,
+        channel: ChannelName,
     },
     /// A channel is no longer needed (last subscriber left)
     ChannelUnsubscribe {
         client_id: u64,
-        channel: String,
+        channel: ChannelName,
     },
 
     ClientDisconnect {
@@ -28,7 +28,7 @@ pub enum PgNotifyEvent {
     },
 
     NotifyMessage {
-        channel: String,
+        channel: ChannelName,
         payload: String,
     },
 }

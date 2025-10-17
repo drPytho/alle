@@ -7,7 +7,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 use tracing::{debug, error, info, warn};
 
-use crate::{bridge::PgNotifyEvent, ClientId, ClientMessage, NotificationMessage, ServerMessage};
+use crate::{bridge::PgNotifyEvent, ChannelName, ClientId, ClientMessage, NotificationMessage, ServerMessage};
 
 /// WebSocket server that handles client connections
 pub struct WebSocketServer {
@@ -66,7 +66,7 @@ impl WebSocketServer {
 }
 
 struct WebSocketClient {
-    channels: HashSet<String>,
+    channels: HashSet<ChannelName>,
     ws_stream: WebSocketStream<TcpStream>,
     client_id: ClientId,
     pg_notify: UnboundedSender<PgNotifyEvent>,

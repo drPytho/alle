@@ -1,6 +1,5 @@
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
     response::sse::{Event, Sse},
     routing::{get, post},
     Json, Router,
@@ -11,11 +10,11 @@ use std::{sync::Arc, time::Duration};
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::{net::TcpListener, sync::broadcast};
 
-use crate::{bridge::PgNotifyEvent, drop_stream::DropStream, NotificationMessage};
+use crate::{bridge::PgNotifyEvent, drop_stream::DropStream, ChannelName, NotificationMessage};
 
 pub struct HttpPushServerState {
     pg_notify: UnboundedSender<PgNotifyEvent>,
@@ -64,8 +63,21 @@ struct Channels {
 
 #[derive(Deserialize)]
 struct NotifyRequest {
-    channel: String,
+    channel: ChannelName,
     payload: String,
+}
+
+#[derive(Serialize)]
+struct EventMessage {
+    channel: ChannelName,
+    payload: String,
+}
+
+#[derive(Serialize)]
+struct NotifyResponse {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 async fn sse_handler(
@@ -75,32 +87,44 @@ async fn sse_handler(
     let client_id = state
         .client_id_counter
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let channels: Vec<&str> = channels.channels.split(",").collect();
-    for ch in channels.iter() {
+
+    // Parse and validate channel names
+    let filter_channels: Vec<ChannelName> = channels
+        .channels
+        .split(",")
+        .filter_map(|ch| match ChannelName::new(ch) {
+            Ok(channel_name) => Some(channel_name),
+            Err(e) => {
+                tracing::error!("Invalid channel name '{}': {}", ch, e);
+                None
+            }
+        })
+        .collect();
+
+    // Subscribe to all valid channels
+    for ch in filter_channels.iter() {
         state
             .pg_notify
             .send(PgNotifyEvent::ChannelSubscribe {
                 client_id,
-                channel: ch.to_string(),
+                channel: ch.clone(),
             })
             .expect("Should be able to send message");
     }
 
-    // Create guard that will send unsubscribe on drop
-
-    let filter_channels: Vec<String> = channels.into_iter().map(|s| s.to_string()).collect();
     let drop_channels = filter_channels.clone();
     let stream = BroadcastStream::new(state.notify).filter_map(move |v| {
-        // Keep guard alive by cloning Arc into closure
-
         match v {
             Ok(NotificationMessage { channel, payload }) => {
                 if filter_channels.contains(&channel) {
+                    let message = EventMessage {
+                        channel,
+                        payload,
+                    };
+                    let json_data = serde_json::to_string(&message)
+                        .expect("Failed to serialize event message");
                     let event = Event::default()
-                        .data(format!(
-                            r#"{{"channel":"{}","payload":"{}"}}"#,
-                            channel, payload
-                        ))
+                        .data(json_data)
                         .event("message");
 
                     Some(Ok(event))
@@ -119,7 +143,7 @@ async fn sse_handler(
                 .pg_notify
                 .send(PgNotifyEvent::ChannelUnsubscribe {
                     client_id,
-                    channel: ch.to_string(),
+                    channel: ch.clone(),
                 })
                 .expect("Should be able to send message");
         }
@@ -135,12 +159,22 @@ async fn sse_handler(
 async fn notify_handler(
     State(state): State<HttpPushServerState>,
     Json(request): Json<NotifyRequest>,
-) -> StatusCode {
+) -> Json<NotifyResponse> {
     match state.pg_notify.send(PgNotifyEvent::NotifyMessage {
         channel: request.channel,
         payload: request.payload,
     }) {
-        Ok(_) => StatusCode::OK,
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        Ok(_) => Json(NotifyResponse {
+            success: true,
+            error: None,
+        }),
+        Err(e) => {
+            let error_msg = format!("Failed to push event: {}", e);
+            tracing::error!("{}", error_msg);
+            Json(NotifyResponse {
+                success: false,
+                error: Some(error_msg),
+            })
+        }
     }
 }

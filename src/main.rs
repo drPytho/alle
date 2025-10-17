@@ -1,4 +1,4 @@
-use alle::{Bridge, BridgeConfig, ClientMessage, Frontend, ServerMessage};
+use alle::{Bridge, BridgeConfig, ChannelName, ClientMessage, Frontend, ServerMessage};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use futures::{SinkExt, StreamExt};
@@ -182,13 +182,26 @@ async fn run_server(
     tracing::info!("PostgreSQL: {}", postgres_url);
     tracing::info!("WebSocket: {:?}", bind_addr);
 
-    if !channels.is_empty() {
-        tracing::info!("Initial channels: {}", channels.join(", "));
+    // Convert String channels to ChannelName
+    let channel_names: Vec<ChannelName> = channels
+        .into_iter()
+        .filter_map(|ch| match ChannelName::new(ch) {
+            Ok(name) => Some(name),
+            Err(e) => {
+                tracing::error!("Invalid channel name: {}", e);
+                None
+            }
+        })
+        .collect();
+
+    if !channel_names.is_empty() {
+        let channel_strs: Vec<String> = channel_names.iter().map(|ch| ch.to_string()).collect();
+        tracing::info!("Initial channels: {}", channel_strs.join(", "));
     } else {
         tracing::info!("No initial channels - clients will subscribe dynamically");
     }
 
-    let config = BridgeConfig::new(postgres_url, bind_addr).with_channels(channels);
+    let config = BridgeConfig::new(postgres_url, bind_addr).with_channels(channel_names);
     let bridge = Bridge::new(config);
     bridge.run().await?;
 
@@ -222,17 +235,24 @@ async fn run_listen(ws_url: String, channels: Vec<String>) -> Result<()> {
     let (mut write, mut read) = ws_stream.split();
 
     // Track subscribed channels
-    let mut subscribed_channels = std::collections::HashSet::new();
+    let mut subscribed_channels = std::collections::HashSet::<ChannelName>::new();
 
     // Subscribe to all specified channels
     for channel in &channels {
-        let msg = ClientMessage::Subscribe {
-            channel: channel.clone(),
-        };
-        let json = serde_json::to_string(&msg)?;
-        write.send(Message::Text(json)).await?;
-        println!("✓ Subscribing to channel '{}'", channel);
-        subscribed_channels.insert(channel.clone());
+        match ChannelName::new(channel) {
+            Ok(channel_name) => {
+                let msg = ClientMessage::Subscribe {
+                    channel: channel_name.clone(),
+                };
+                let json = serde_json::to_string(&msg)?;
+                write.send(Message::Text(json)).await?;
+                println!("✓ Subscribing to channel '{}'", channel);
+                subscribed_channels.insert(channel_name);
+            }
+            Err(e) => {
+                eprintln!("Invalid channel name '{}': {}", channel, e);
+            }
+        }
     }
 
     if channels.is_empty() {
@@ -300,22 +320,36 @@ async fn run_listen(ws_url: String, channels: Vec<String>) -> Result<()> {
                         match parts.first().copied() {
                             Some("sub") | Some("subscribe") => {
                                 if let Some(channel) = parts.get(1) {
-                                    let msg = ClientMessage::Subscribe {
-                                        channel: channel.to_string(),
-                                    };
-                                    let json = serde_json::to_string(&msg)?;
-                                    write.send(Message::Text(json)).await?;
+                                    match ChannelName::new(channel) {
+                                        Ok(channel_name) => {
+                                            let msg = ClientMessage::Subscribe {
+                                                channel: channel_name,
+                                            };
+                                            let json = serde_json::to_string(&msg)?;
+                                            write.send(Message::Text(json)).await?;
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Invalid channel name: {}", e);
+                                        }
+                                    }
                                 } else {
                                     println!("Usage: sub <channel>");
                                 }
                             }
                             Some("unsub") | Some("unsubscribe") => {
                                 if let Some(channel) = parts.get(1) {
-                                    let msg = ClientMessage::Unsubscribe {
-                                        channel: channel.to_string(),
-                                    };
-                                    let json = serde_json::to_string(&msg)?;
-                                    write.send(Message::Text(json)).await?;
+                                    match ChannelName::new(channel) {
+                                        Ok(channel_name) => {
+                                            let msg = ClientMessage::Unsubscribe {
+                                                channel: channel_name,
+                                            };
+                                            let json = serde_json::to_string(&msg)?;
+                                            write.send(Message::Text(json)).await?;
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Invalid channel name: {}", e);
+                                        }
+                                    }
                                 } else {
                                     println!("Usage: unsub <channel>");
                                 }
@@ -379,8 +413,11 @@ async fn run_publish(ws_url: String, channel: String, payload: String) -> Result
 
     println!("Publishing to channel '{}': {}", channel, payload);
 
+    let channel_name = ChannelName::new(&channel)
+        .context(format!("Invalid channel name '{}'", channel))?;
+
     let msg = ClientMessage::Notify {
-        channel: channel.clone(),
+        channel: channel_name,
         payload: payload.clone(),
     };
     let json = serde_json::to_string(&msg)?;

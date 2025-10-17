@@ -2,48 +2,19 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use futures::StreamExt;
 use tokio::sync::broadcast;
 use tokio_postgres::{AsyncMessage, Client, NoTls};
 
-use crate::NotificationMessage;
-
-/// Validate channel name to prevent SQL injection
-/// Only allows alphanumeric characters and underscores, must start with letter or underscore
-fn validate_channel_name(channel: &str) -> Result<()> {
-    if channel.is_empty() {
-        return Err(anyhow!("Channel name cannot be empty"));
-    }
-
-    if channel.len() > 63 {
-        return Err(anyhow!("Channel name too long (max 63 characters)"));
-    }
-
-    let first_char = channel.chars().next().unwrap();
-    if !first_char.is_ascii_alphabetic() && first_char != '_' {
-        return Err(anyhow!(
-            "Channel name must start with a letter or underscore"
-        ));
-    }
-
-    for ch in channel.chars() {
-        if !ch.is_ascii_alphanumeric() && ch != '_' {
-            return Err(anyhow!(
-                "Channel name can only contain letters, numbers, and underscores"
-            ));
-        }
-    }
-
-    Ok(())
-}
+use crate::{ChannelName, NotificationMessage};
 
 /// PostgreSQL LISTEN/NOTIFY client
 pub struct PostgresListener {
     client: Client,
     notification_tx: broadcast::Sender<NotificationMessage>,
 
-    channels: Arc<RwLock<HashMap<String, HashSet<u64>>>>,
+    channels: Arc<RwLock<HashMap<ChannelName, HashSet<u64>>>>,
 }
 
 impl PostgresListener {
@@ -68,8 +39,17 @@ impl PostgresListener {
             while let Some(message) = stream.next().await {
                 match message {
                     Ok(AsyncMessage::Notification(notif)) => {
+                        // Parse channel name - this should always succeed since Postgres validated it
+                        let channel = match ChannelName::new(notif.channel()) {
+                            Ok(ch) => ch,
+                            Err(e) => {
+                                tracing::error!("Invalid channel name from Postgres: {}", e);
+                                continue;
+                            }
+                        };
+
                         let msg = NotificationMessage {
-                            channel: notif.channel().to_string(),
+                            channel: channel.clone(),
                             payload: notif.payload().to_string(),
                         };
                         tracing::debug!(
@@ -101,9 +81,7 @@ impl PostgresListener {
         ))
     }
 
-    pub async fn listen(&self, client_id: u64, channel: String) -> Result<()> {
-        validate_channel_name(&channel)?;
-
+    pub async fn listen(&self, client_id: u64, channel: ChannelName) -> Result<()> {
         let mut channels = self.channels.write().await;
 
         let client_ids = channels.entry(channel.clone()).or_insert_with(HashSet::new);
@@ -116,9 +94,7 @@ impl PostgresListener {
         Ok(())
     }
 
-    pub async fn unlisten(&self, client_id: u64, channel: String) -> Result<()> {
-        validate_channel_name(&channel)?;
-
+    pub async fn unlisten(&self, client_id: u64, channel: ChannelName) -> Result<()> {
         let mut channels = self.channels.write().await;
 
         let client_ids = channels.entry(channel.clone()).or_insert_with(HashSet::new);
@@ -143,7 +119,7 @@ impl PostgresListener {
                     None
                 }
             })
-            .collect::<Vec<String>>();
+            .collect::<Vec<ChannelName>>();
 
         // Remove client from each channel's subscriber list
         for val in vals.into_iter() {
@@ -160,7 +136,7 @@ impl PostgresListener {
     }
 
     /// Subscribe to a channel (LISTEN)
-    async fn execute_listen(&self, channel: &str) -> Result<()> {
+    async fn execute_listen(&self, channel: &ChannelName) -> Result<()> {
         self.client
             .execute(&format!("LISTEN {}", channel), &[])
             .await
@@ -169,9 +145,7 @@ impl PostgresListener {
         Ok(())
     }
     /// Unsubscribe from a channel (UNLISTEN)
-    async fn execute_unlisten(&self, channel: &str) -> Result<()> {
-        validate_channel_name(channel)?;
-
+    async fn execute_unlisten(&self, channel: &ChannelName) -> Result<()> {
         self.client
             .execute(&format!("UNLISTEN {}", channel), &[])
             .await
@@ -181,14 +155,17 @@ impl PostgresListener {
     }
 
     /// Send a notification to a channel (NOTIFY)
-    pub async fn notify(&self, channel: &str, payload: &str) -> Result<()> {
-        validate_channel_name(channel)?;
-
-        let query = format!("NOTIFY {}, '$1'", channel);
-        self.client
-            .execute(&query, &[&payload])
+    pub async fn notify(&self, channel: &ChannelName, payload: &str) -> Result<()> {
+        tracing::debug!("Channer: {}, Payload: {}", channel, payload);
+        let channel_str = channel.as_str();
+        if let Err(e) = self
+            .client
+            .execute("SELECT pg_notify($1, $2)", &[&channel_str, &payload])
             .await
-            .context(format!("Failed to NOTIFY on channel '{}'", channel))?;
+        {
+            tracing::error!("could not notify postgres {:?}", e.to_string());
+            return Err(e.into());
+        }
 
         tracing::debug!("Sent notification to channel '{}': {}", channel, payload);
         Ok(())
