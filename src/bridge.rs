@@ -4,8 +4,8 @@ use tokio::sync::mpsc::Sender;
 use tracing::info;
 
 use crate::{
-    server_push::server, BridgeConfig, ChannelName, Frontend, NotificationMessage,
-    PostgresListener, WebSocketServer,
+    server_push::server, BridgeConfig, ChannelName, NotificationMessage, PostgresListener,
+    WebSocketServer,
 };
 
 /// Main bridge that connects Postgres NOTIFY with WebSocket clients
@@ -47,7 +47,7 @@ impl Bridge {
     /// This will:
     /// 1. Connect to PostgreSQL
     /// 2. Create subscription manager for dynamic channel management
-    /// 3. Start the WebSocket server
+    /// 3. Start the WebSocket server and/or Server-Side Events server
     /// 4. Dynamically LISTEN/UNLISTEN on Postgres based on client subscriptions
     /// 5. Forward messages bidirectionally between Postgres and WebSocket clients
     pub async fn run(self) -> Result<()> {
@@ -61,19 +61,44 @@ impl Bridge {
 
         // Spawn task to handle subscription events (dynamic LISTEN/UNLISTEN)
 
-        match self.config.frontend {
-            Frontend::WebSocket { bind_addr } => {
-                info!("websocker path");
-                let ws_server = WebSocketServer::new(bind_addr, Arc::clone(&pg_listener));
+        // Spawn both servers if both are configured, or just one if only one is configured
+        match (
+            &self.config.frontend.websocket,
+            &self.config.frontend.server_push,
+        ) {
+            (Some(ws_addr), Some(se_addr)) => {
+                info!("Starting both WebSocket and Server-Side Events servers");
+                let ws_addr = ws_addr.clone();
+                let se_addr = se_addr.clone();
+                let pg_listener_ws = Arc::clone(&pg_listener);
+                let pg_listener_se = Arc::clone(&pg_listener);
 
-                // Start WebSocket server (this forwards Postgres notifications to clients)
+                // Run both servers concurrently
+                tokio::try_join!(
+                    async move {
+                        info!("WebSocket server starting");
+                        let ws_server = WebSocketServer::new(ws_addr, pg_listener_ws);
+                        ws_server.start().await
+                    },
+                    async move {
+                        info!("Server-Side Events server starting");
+                        server(se_addr, pg_listener_se).await
+                    }
+                )?;
+            }
+            (Some(ws_addr), None) => {
+                info!("WebSocket server path");
+                let ws_server = WebSocketServer::new(ws_addr.clone(), Arc::clone(&pg_listener));
                 ws_server.start().await?;
             }
-            Frontend::ServerPush { bind_addr } => {
-                info!("Server push path");
-                if let Err(e) = server(bind_addr, Arc::clone(&pg_listener)).await {
-                    panic!("{}", e);
-                }
+            (None, Some(se_addr)) => {
+                info!("Server-Side Events server path");
+                server(se_addr.clone(), Arc::clone(&pg_listener)).await?;
+            }
+            (None, None) => {
+                return Err(anyhow::anyhow!(
+                    "At least one frontend (WebSocket or Server-Side Events) must be configured"
+                ));
             }
         }
 

@@ -159,9 +159,28 @@ pub enum ServerMessage {
 }
 
 #[derive(Debug, Clone)]
-pub enum Frontend {
-    WebSocket { bind_addr: String },
-    ServerPush { bind_addr: String },
+pub struct Frontend {
+    pub websocket: Option<String>,
+    pub server_push: Option<String>,
+}
+
+impl Frontend {
+    pub fn new() -> Self {
+        Self {
+            websocket: None,
+            server_push: None,
+        }
+    }
+
+    pub fn with_websocket(mut self, bind_addr: String) -> Self {
+        self.websocket = Some(bind_addr);
+        self
+    }
+
+    pub fn with_server_push(mut self, bind_addr: String) -> Self {
+        self.server_push = Some(bind_addr);
+        self
+    }
 }
 
 /// Configuration for the bridge
