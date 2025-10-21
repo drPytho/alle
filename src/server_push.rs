@@ -7,18 +7,16 @@ use axum::{
 use futures::stream::Stream;
 use std::{convert::Infallible, sync::atomic::AtomicU64};
 use std::{sync::Arc, time::Duration};
-use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+use tokio_stream::{once, wrappers::ReceiverStream, StreamExt};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::{net::TcpListener, sync::broadcast};
+use tokio::net::TcpListener;
 
-use crate::{bridge::PgNotifyEvent, drop_stream::DropStream, ChannelName, NotificationMessage};
+use crate::{drop_stream::DropStream, ChannelName, NotificationMessage, PostgresListener};
 
 pub struct HttpPushServerState {
-    pg_notify: UnboundedSender<PgNotifyEvent>,
-    notify: broadcast::Receiver<NotificationMessage>,
+    pg_notify: Arc<PostgresListener>,
     client_id_counter: Arc<AtomicU64>,
 }
 
@@ -26,24 +24,18 @@ impl Clone for HttpPushServerState {
     fn clone(&self) -> Self {
         HttpPushServerState {
             pg_notify: self.pg_notify.clone(),
-            notify: self.notify.resubscribe(),
             client_id_counter: self.client_id_counter.clone(),
         }
     }
 }
 
-pub async fn server(
-    bind_addr: String,
-    pg_notify: UnboundedSender<PgNotifyEvent>,
-    notify: broadcast::Receiver<NotificationMessage>,
-) -> Result<()> {
+pub async fn server(bind_addr: String, pg_notify: Arc<PostgresListener>) -> Result<()> {
     let listener = TcpListener::bind(bind_addr)
         .await
         .expect("We should be able to bind out server to addr");
 
     let state = HttpPushServerState {
         pg_notify,
-        notify,
         client_id_counter: Arc::new(AtomicU64::new(0)),
     };
 
@@ -61,35 +53,23 @@ struct Channels {
     channels: String,
 }
 
-#[derive(Deserialize)]
-struct NotifyRequest {
-    channel: ChannelName,
-    payload: String,
-}
-
 #[derive(Serialize)]
 struct EventMessage {
     channel: ChannelName,
     payload: String,
 }
 
-#[derive(Serialize)]
-struct NotifyResponse {
-    success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
 async fn sse_handler(
     channels: Query<Channels>,
     State(state): State<HttpPushServerState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let (sender, receiver) = tokio::sync::mpsc::channel(32);
     let client_id = state
         .client_id_counter
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     // Parse and validate channel names
-    let filter_channels: Vec<ChannelName> = channels
+    let channels: Vec<ChannelName> = channels
         .channels
         .split(",")
         .filter_map(|ch| match ChannelName::new(ch) {
@@ -102,51 +82,35 @@ async fn sse_handler(
         .collect();
 
     // Subscribe to all valid channels
-    for ch in filter_channels.iter() {
+    state
+        .pg_notify
+        .listen_many(client_id, &channels, sender.clone())
+        .await
+        .expect("Should be able to send message");
+
+    let drop_channels = channels.clone();
+
+    let stream = ReceiverStream::new(receiver).filter_map(
+        move |NotificationMessage { channel, payload }| {
+            let message = EventMessage { channel, payload };
+            let json_data =
+                serde_json::to_string(&message).expect("Failed to serialize event message");
+            let event = Event::default().data(json_data).event("message");
+
+            Some(Ok(event))
+        },
+    );
+
+    let ping = once(Ok(Event::DEFAULT_KEEP_ALIVE));
+
+    let stream = ping.chain(stream);
+
+    let stream = DropStream::new(stream, move || async move {
         state
             .pg_notify
-            .send(PgNotifyEvent::ChannelSubscribe {
-                client_id,
-                channel: ch.clone(),
-            })
+            .unlisten_many(client_id, &drop_channels)
+            .await
             .expect("Should be able to send message");
-    }
-
-    let drop_channels = filter_channels.clone();
-    let stream = BroadcastStream::new(state.notify).filter_map(move |v| {
-        match v {
-            Ok(NotificationMessage { channel, payload }) => {
-                if filter_channels.contains(&channel) {
-                    let message = EventMessage {
-                        channel,
-                        payload,
-                    };
-                    let json_data = serde_json::to_string(&message)
-                        .expect("Failed to serialize event message");
-                    let event = Event::default()
-                        .data(json_data)
-                        .event("message");
-
-                    Some(Ok(event))
-                } else {
-                    None
-                }
-            }
-
-            Err(_e) => None,
-        }
-    });
-
-    let stream = DropStream::new(stream, move || {
-        for ch in drop_channels {
-            state
-                .pg_notify
-                .send(PgNotifyEvent::ChannelUnsubscribe {
-                    client_id,
-                    channel: ch.clone(),
-                })
-                .expect("Should be able to send message");
-        }
     });
 
     Sse::new(stream).keep_alive(
@@ -156,14 +120,36 @@ async fn sse_handler(
     )
 }
 
+#[derive(Deserialize)]
+struct NotifyRequest {
+    channel: ChannelName,
+    payload: String,
+}
+
+#[derive(Serialize)]
+struct NotifyResponse {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
 async fn notify_handler(
     State(state): State<HttpPushServerState>,
     Json(request): Json<NotifyRequest>,
 ) -> Json<NotifyResponse> {
-    match state.pg_notify.send(PgNotifyEvent::NotifyMessage {
-        channel: request.channel,
-        payload: request.payload,
-    }) {
+    let channel = match ChannelName::new(request.channel) {
+        Ok(val) => val,
+        Err(e) => {
+            let error_msg = format!("Bad channel name: {}", e);
+            tracing::error!("{}", error_msg);
+            return Json(NotifyResponse {
+                success: false,
+                error: Some(error_msg),
+            });
+        }
+    };
+    let res = state.pg_notify.notify(&channel, &request.payload).await;
+    match res {
         Ok(_) => Json(NotifyResponse {
             success: true,
             error: None,
