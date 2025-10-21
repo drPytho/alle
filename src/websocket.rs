@@ -1,31 +1,32 @@
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use std::collections::HashSet;
+use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::{Sender, UnboundedSender};
+use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    bridge::PgNotifyEvent, ChannelName, ClientId, ClientMessage, NotificationMessage, ServerMessage,
+    ChannelName, ClientId, ClientMessage, NotificationMessage, PostgresListener, ServerMessage,
 };
 
 /// WebSocket server that handles client connections
 pub struct WebSocketServer {
     bind_addr: String,
-    pg_notify: UnboundedSender<PgNotifyEvent>,
+    pg_listener: Arc<PostgresListener>,
 
     next_client_id: u64,
 }
 
 impl WebSocketServer {
     /// Create a new WebSocket server
-    pub fn new(bind_addr: String, pg_notify: UnboundedSender<PgNotifyEvent>) -> Self {
+    pub fn new(bind_addr: String, pg_listener: Arc<PostgresListener>) -> Self {
         Self {
             bind_addr,
-            pg_notify,
+            pg_listener,
             next_client_id: 0,
         }
     }
@@ -45,10 +46,10 @@ impl WebSocketServer {
 
             let client_id = self.next_client_id;
             self.next_client_id += 1;
-            let pg_notify = self.pg_notify.clone();
+            let pg_listener = Arc::clone(&self.pg_listener);
 
             tokio::spawn(async move {
-                let mut client = match WebSocketClient::new(client_id, stream, pg_notify).await {
+                let mut client = match WebSocketClient::new(client_id, stream, pg_listener).await {
                     Ok(client) => client,
                     Err(err) => {
                         error!("Error instanciating the connection to {}: {}", addr, err);
@@ -68,14 +69,14 @@ struct WebSocketClient {
     channels: HashSet<ChannelName>,
     ws_stream: WebSocketStream<TcpStream>,
     client_id: ClientId,
-    pg_notify: UnboundedSender<PgNotifyEvent>,
+    pg_listener: Arc<PostgresListener>,
 }
 
 impl WebSocketClient {
     async fn new(
         client_id: ClientId,
         stream: TcpStream,
-        pg_notify: UnboundedSender<PgNotifyEvent>,
+        pg_listener: Arc<PostgresListener>,
     ) -> Result<Self> {
         let ws_stream = accept_async(stream)
             .await
@@ -85,7 +86,7 @@ impl WebSocketClient {
             channels: HashSet::new(),
             ws_stream,
             client_id,
-            pg_notify,
+            pg_listener,
         })
     }
     async fn handle_connection(&mut self) -> Result<()> {
@@ -95,9 +96,12 @@ impl WebSocketClient {
         let result = self.handle_client_loop().await;
 
         // Clean up client subscriptions on disconnect
-        self.pg_notify.send(PgNotifyEvent::ClientDisconnect {
-            client_id: self.client_id,
-        })?;
+        let channels_to_cleanup: Vec<ChannelName> = self.channels.iter().cloned().collect();
+        if !channels_to_cleanup.is_empty() {
+            if let Err(e) = self.pg_listener.unlisten_many(self.client_id, &channels_to_cleanup).await {
+                warn!("Failed to cleanup subscriptions for client {}: {}", self.client_id, e);
+            }
+        }
         info!("Client {} disconnected", self.client_id);
 
         result
@@ -184,28 +188,28 @@ impl WebSocketClient {
         match client_msg {
             ClientMessage::Subscribe { channel } => {
                 self.channels.insert(channel.clone());
-                self.pg_notify.send(PgNotifyEvent::ChannelSubscribe {
-                    client_id: self.client_id,
-                    channel: channel.clone(),
-                    chan: chan.clone(),
-                })?;
+                self.pg_listener
+                    .listen(self.client_id, channel.clone(), chan.clone())
+                    .await
+                    .context("Failed to subscribe to channel")?;
 
                 self.send(ServerMessage::Subscribed { channel }).await?;
             }
 
             ClientMessage::Unsubscribe { channel } => {
                 self.channels.remove(&channel);
-                self.pg_notify.send(PgNotifyEvent::ChannelUnsubscribe {
-                    client_id: self.client_id,
-                    channel: channel.clone(),
-                })?;
+                self.pg_listener
+                    .unlisten(self.client_id, channel.clone())
+                    .await
+                    .context("Failed to unsubscribe from channel")?;
 
                 self.send(ServerMessage::Unsubscribed { channel }).await?;
             }
 
             ClientMessage::Notify { channel, payload } => {
-                self.pg_notify
-                    .send(PgNotifyEvent::NotifyMessage { channel, payload })
+                self.pg_listener
+                    .notify(&channel, &payload)
+                    .await
                     .context("Failed to forward message to Postgres")?;
             }
         }

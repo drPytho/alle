@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::mpsc::Sender;
 use tracing::info;
 
 use crate::{
@@ -59,62 +59,19 @@ impl Bridge {
 
         // Create subscription manager
 
-        let (pg_event_tx, mut pg_event_rx) = mpsc::unbounded_channel::<PgNotifyEvent>();
-
         // Spawn task to handle subscription events (dynamic LISTEN/UNLISTEN)
-        let pg_listener_for_events = Arc::clone(&pg_listener);
-        tokio::spawn(async move {
-            while let Some(event) = pg_event_rx.recv().await {
-                // TODO: This contains a race condition
-                match event {
-                    PgNotifyEvent::ChannelSubscribe {
-                        client_id,
-                        channel,
-                        chan,
-                    } => {
-                        info!("First subscriber to '{}', issuing LISTEN", channel);
-                        if let Err(e) = pg_listener_for_events
-                            .listen(client_id, channel.clone(), chan)
-                            .await
-                        {
-                            tracing::error!("Failed to LISTEN on channel '{}': {}", channel, e);
-                        }
-                    }
-
-                    PgNotifyEvent::ChannelUnsubscribe { client_id, channel } => {
-                        info!("No more subscribers to '{}', issuing UNLISTEN", channel);
-                        if let Err(e) = pg_listener_for_events
-                            .unlisten(client_id, channel.clone())
-                            .await
-                        {
-                            tracing::error!("Failed to UNLISTEN on channel '{}': {}", channel, e);
-                        }
-                    }
-
-                    PgNotifyEvent::ClientDisconnect { client_id: _ } => {
-                        todo!();
-                    }
-
-                    PgNotifyEvent::NotifyMessage { channel, payload } => {
-                        if let Err(e) = pg_listener_for_events.notify(&channel, &payload).await {
-                            tracing::error!("Failed to send NOTIFY to Postgres: {}", e);
-                        }
-                    }
-                }
-            }
-        });
 
         match self.config.frontend {
             Frontend::WebSocket { bind_addr } => {
                 info!("websocker path");
-                let ws_server = WebSocketServer::new(bind_addr, pg_event_tx.clone());
+                let ws_server = WebSocketServer::new(bind_addr, Arc::clone(&pg_listener));
 
                 // Start WebSocket server (this forwards Postgres notifications to clients)
                 ws_server.start().await?;
             }
             Frontend::ServerPush { bind_addr } => {
                 info!("Server push path");
-                if let Err(e) = server(bind_addr, pg_event_tx.clone()).await {
+                if let Err(e) = server(bind_addr, Arc::clone(&pg_listener)).await {
                     panic!("{}", e);
                 }
             }
