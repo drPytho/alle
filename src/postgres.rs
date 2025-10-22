@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc::Sender, RwLock};
 
 use anyhow::{Context, Result};
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use tokio_postgres::{AsyncMessage, Client, NoTls};
 
 use crate::{ChannelName, NotificationMessage};
@@ -28,10 +28,32 @@ impl PostgresListener {
         let channels: Arc<RwLock<ChannelsMap>> = Arc::new(RwLock::new(HashMap::new()));
         let (tx, rx) = futures_channel::mpsc::unbounded();
 
-        // Forward connection messages to channel
-        let stream = futures::stream::poll_fn(move |cx| connection.poll_message(cx))
-            .map_err(|e| panic!("{:?}", e));
-        tokio::spawn(stream.forward(tx));
+        // Forward connection messages to channel with graceful error handling
+        // This is required to keep polling the connection future when we do
+        // separate queries. Otherwise it's a risk it will deadlock
+        tokio::spawn(async move {
+            let mut stream = futures::stream::poll_fn(move |cx| connection.poll_message(cx));
+
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok(msg) => {
+                        if tx.unbounded_send(msg).is_err() {
+                            tracing::warn!(
+                                "Notification handler disconnected, stopping connection poll"
+                            );
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("PostgreSQL connection error: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            tracing::info!("PostgreSQL connection closed");
+            // tx is dropped here, which closes the channel and signals notification handler
+        });
 
         // Spawn notification handler
         tokio::spawn(Self::handle_notifications(rx, channels.clone()));
