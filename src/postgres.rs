@@ -55,18 +55,15 @@ impl PostgresListener {
                         );
 
                         let channel_map_guard = channel_map.read().await;
-                        tracing::info!("got read lock");
 
                         if let Some(set) = channel_map_guard.get(&channel) {
                             let mut dead_ids = Vec::new();
 
                             for (id, chan) in set.iter() {
-                                tracing::info!("sending");
                                 if let Err(e) = chan.send(msg.clone()).await {
                                     tracing::warn!("Receiver {} disconnected: {}", id, e);
                                     dead_ids.push(*id);
                                 }
-                                tracing::info!("sent");
                             }
 
                             drop(channel_map_guard); // Release read lock
@@ -152,12 +149,17 @@ impl PostgresListener {
 
         // Execute UNLISTEN commands outside the lock to avoid deadlock
 
-        let channels = self.channels.read().await;
+        // TODO: We really want a lock around unlisten
+        // let channels = self.channels.read().await;
+        // for channel in channels_needing_unlisten {
+        //     let empty = channels.get(&channel).is_none_or(|v| v.is_empty());
+        //     if empty {
+        //         self.execute_unlisten(&channel).await?;
+        //     }
+        // }
+
         for channel in channels_needing_unlisten {
-            let empty = channels.get(&channel).is_none_or(|v| v.is_empty());
-            if empty {
-                self.execute_unlisten(&channel).await?;
-            }
+            self.execute_unlisten(&channel).await?;
         }
 
         Ok(())
@@ -423,7 +425,6 @@ mod tests {
                             ChannelName::new(format!("streas_test_{}_{}", client_id, cycle))
                                 .unwrap();
                         // Listen
-                        tracing::info!("Listen {} {}", client_id, cycle);
                         if let Err(e) = listener_clone
                             .listen_many(client_id, from_ref(&channel_clone), tx)
                             .await
@@ -438,11 +439,9 @@ mod tests {
                         // Small random delay to create timing variations
                         tokio::time::sleep(Duration::from_millis(client_id % 10)).await;
 
-                        tracing::info!("Receive {} {}", client_id, cycle);
                         // Try to receive a message (with short timeout)
                         let _ = timeout(Duration::from_millis(50), rx.recv()).await;
 
-                        tracing::info!("Unlisten {} {}", client_id, cycle);
                         // Unlisten
                         if let Err(e) = listener_clone
                             .unlisten_many(client_id, from_ref(&channel_clone))
@@ -454,7 +453,6 @@ mod tests {
                             );
                         }
 
-                        tracing::info!("Done {} {}", client_id, cycle);
                         // Small delay before next cycle
                         tokio::time::sleep(Duration::from_millis(5)).await;
                     }
