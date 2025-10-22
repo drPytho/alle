@@ -26,135 +26,92 @@ impl PostgresListener {
         tracing::info!("Connected to PostgreSQL");
 
         let channels: Arc<RwLock<ChannelsMap>> = Arc::new(RwLock::new(HashMap::new()));
-        // Spawn a task to handle connection and notifications
-        let channel_map = channels.clone();
+        let (tx, rx) = futures_channel::mpsc::unbounded();
 
-        // Make transmitter and receiver.
-        //futures_channel
-        let (tx, mut rx) = futures_channel::mpsc::unbounded();
-
+        // Forward connection messages to channel
         let stream = futures::stream::poll_fn(move |cx| connection.poll_message(cx))
             .map_err(|e| panic!("{:?}", e));
+        tokio::spawn(stream.forward(tx));
 
-        let connection = stream.forward(tx);
-
-        tokio::spawn(connection);
-
-        tokio::spawn(async move {
-            // let mut stream = futures::stream::poll_fn(move |cx| connection.poll_message(cx));
-
-            while let Some(v) = rx.next().await {
-                match v {
-                    AsyncMessage::Notification(notif) => {
-                        // Parse channel name - this should always succeed since Postgres validated it
-                        let channel = match ChannelName::new(notif.channel()) {
-                            Ok(ch) => ch,
-                            Err(e) => {
-                                tracing::error!("Invalid channel name from Postgres: {}", e);
-                                continue;
-                            }
-                        };
-
-                        let msg = NotificationMessage {
-                            channel: channel.clone(),
-                            payload: notif.payload().to_string(),
-                        };
-                        tracing::debug!(
-                            "Received notification on channel '{}': {}",
-                            msg.channel,
-                            msg.payload
-                        );
-
-                        let channel_map_guard = channel_map.read().await;
-
-                        if let Some(set) = channel_map_guard.get(&channel) {
-                            let mut dead_ids = Vec::new();
-
-                            for (id, chan) in set.iter() {
-                                if let Err(e) = chan.send(msg.clone()).await {
-                                    tracing::warn!("Receiver {} disconnected: {}", id, e);
-                                    dead_ids.push(*id);
-                                }
-                            }
-
-                            drop(channel_map_guard); // Release read lock
-
-                            if !dead_ids.is_empty() {
-                                let mut channel_map_guard = channel_map.write().await;
-                                if let Some(client_map) = channel_map_guard.get_mut(&channel) {
-                                    for id in dead_ids {
-                                        client_map.remove(&id);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    AsyncMessage::Notice(e) => {
-                        panic!("Some notice e {:?}", e)
-                    }
-
-                    _ => todo!(),
-                }
-            }
-
-            // while let Some(message) = rx.next().await {
-            //     match message {
-            //         Ok(AsyncMessage::Notification(notif)) => {
-            //             // Parse channel name - this should always succeed since Postgres validated it
-            //             let channel = match ChannelName::new(notif.channel()) {
-            //                 Ok(ch) => ch,
-            //                 Err(e) => {
-            //                     tracing::error!("Invalid channel name from Postgres: {}", e);
-            //                     continue;
-            //                 }
-            //             };
-            //
-            //             let msg = NotificationMessage {
-            //                 channel: channel.clone(),
-            //                 payload: notif.payload().to_string(),
-            //             };
-            //             tracing::debug!(
-            //                 "Received notification on channel '{}': {}",
-            //                 msg.channel,
-            //                 msg.payload
-            //             );
-            //
-            //             let channel_map_guard = channel_map.read().await;
-            //
-            //             if let Some(set) = channel_map_guard.get(&channel) {
-            //                 let mut dead_ids = Vec::new();
-            //
-            //                 for (id, chan) in set.iter() {
-            //                     if let Err(e) = chan.send(msg.clone()).await {
-            //                         tracing::warn!("Receiver {} disconnected: {}", id, e);
-            //                         dead_ids.push(*id);
-            //                     }
-            //                 }
-            //
-            //                 drop(channel_map_guard); // Release read lock
-            //
-            //                 if !dead_ids.is_empty() {
-            //                     let mut channel_map_guard = channel_map.write().await;
-            //                     if let Some(client_map) = channel_map_guard.get_mut(&channel) {
-            //                         for id in dead_ids {
-            //                             client_map.remove(&id);
-            //                         }
-            //                     }
-            //                 }
-            //             }
-            //         }
-            //         Ok(other) => {
-            //             tracing::warn!("Other returned {:?} ", other);
-            //         }
-            //         Err(e) => {
-            //             tracing::error!("PostgreSQL connection error: {}", e);
-            //             break;
-            //         }
-            //     }
-            // }
-        });
+        // Spawn notification handler
+        tokio::spawn(Self::handle_notifications(rx, channels.clone()));
 
         Ok(Self { client, channels })
+    }
+
+    /// Background task that receives notifications from Postgres and distributes
+    /// them to subscribed clients, cleaning up dead connections.
+    async fn handle_notifications(
+        mut rx: futures_channel::mpsc::UnboundedReceiver<AsyncMessage>,
+        channel_map: Arc<RwLock<ChannelsMap>>,
+    ) {
+        while let Some(msg) = rx.next().await {
+            match msg {
+                AsyncMessage::Notification(notif) => {
+                    Self::handle_notification(notif, &channel_map).await;
+                }
+                AsyncMessage::Notice(notice) => {
+                    tracing::warn!("PostgreSQL notice: {:?}", notice);
+                }
+                _ => {
+                    tracing::debug!("Unhandled async message type");
+                }
+            }
+        }
+        tracing::info!("Notification handler shutting down");
+    }
+
+    /// Process a single notification by distributing to subscribers
+    async fn handle_notification(
+        notif: tokio_postgres::Notification,
+        channel_map: &RwLock<ChannelsMap>,
+    ) {
+        let channel = match ChannelName::new(notif.channel()) {
+            Ok(ch) => ch,
+            Err(e) => {
+                tracing::error!("Invalid channel name from Postgres: {}", e);
+                return;
+            }
+        };
+
+        let msg = NotificationMessage {
+            channel: channel.clone(),
+            payload: notif.payload().to_string(),
+        };
+
+        tracing::debug!(
+            "Received notification on channel '{}': {}",
+            msg.channel,
+            msg.payload
+        );
+
+        // Distribute to subscribers and collect dead clients
+        let dead_ids = {
+            let channel_map_guard = channel_map.read().await;
+
+            let Some(subscribers) = channel_map_guard.get(&channel) else {
+                return; // No subscribers for this channel
+            };
+
+            let mut dead_ids = Vec::new();
+            for (id, chan) in subscribers.iter() {
+                if let Err(e) = chan.send(msg.clone()).await {
+                    tracing::warn!("Receiver {} disconnected: {}", id, e);
+                    dead_ids.push(*id);
+                }
+            }
+            dead_ids
+        }; // Release read lock
+
+        // Clean up dead clients
+        if !dead_ids.is_empty() {
+            let mut channel_map_guard = channel_map.write().await;
+            if let Some(client_map) = channel_map_guard.get_mut(&channel) {
+                for id in dead_ids {
+                    client_map.remove(&id);
+                }
+            }
+        }
     }
 
     /// Subscribe to multiple channels at once
