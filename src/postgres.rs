@@ -1,10 +1,9 @@
-use core::panic;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc::Sender, RwLock};
 
 use anyhow::{Context, Result};
-use futures::{FutureExt, StreamExt, TryStreamExt};
+use futures::{StreamExt, TryStreamExt};
 use tokio_postgres::{AsyncMessage, Client, NoTls};
 
 use crate::{ChannelName, NotificationMessage};
@@ -215,7 +214,6 @@ impl PostgresListener {
 
         // Execute UNLISTEN commands outside the lock to avoid deadlock
 
-        // TODO: We really want a lock around unlisten
         let channels = self.channels.read().await;
         for channel in channels_needing_unlisten {
             let empty = channels.get(&channel).is_none_or(|v| v.is_empty());
@@ -223,10 +221,6 @@ impl PostgresListener {
                 self.execute_unlisten(&channel).await?;
             }
         }
-
-        // for channel in channels_needing_unlisten {
-        //     self.execute_unlisten(&channel).await?;
-        // }
 
         Ok(())
     }
