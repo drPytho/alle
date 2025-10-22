@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod bridge;
 mod drop_stream;
 pub mod postgres;
