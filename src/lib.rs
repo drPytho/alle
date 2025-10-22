@@ -164,6 +164,12 @@ pub struct Frontend {
     pub server_push: Option<String>,
 }
 
+impl Default for Frontend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Frontend {
     pub fn new() -> Self {
         Self {

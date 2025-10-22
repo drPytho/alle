@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use std::collections::HashSet;
+use std::slice::from_ref;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -98,8 +99,15 @@ impl WebSocketClient {
         // Clean up client subscriptions on disconnect
         let channels_to_cleanup: Vec<ChannelName> = self.channels.iter().cloned().collect();
         if !channels_to_cleanup.is_empty() {
-            if let Err(e) = self.pg_listener.unlisten_many(self.client_id, &channels_to_cleanup).await {
-                warn!("Failed to cleanup subscriptions for client {}: {}", self.client_id, e);
+            if let Err(e) = self
+                .pg_listener
+                .unlisten_many(self.client_id, &channels_to_cleanup)
+                .await
+            {
+                warn!(
+                    "Failed to cleanup subscriptions for client {}: {}",
+                    self.client_id, e
+                );
             }
         }
         info!("Client {} disconnected", self.client_id);
@@ -189,7 +197,7 @@ impl WebSocketClient {
             ClientMessage::Subscribe { channel } => {
                 self.channels.insert(channel.clone());
                 self.pg_listener
-                    .listen_many(self.client_id, &[channel.clone()], chan.clone())
+                    .listen_many(self.client_id, from_ref(&channel), chan.clone())
                     .await
                     .context("Failed to subscribe to channel")?;
 
@@ -199,7 +207,7 @@ impl WebSocketClient {
             ClientMessage::Unsubscribe { channel } => {
                 self.channels.remove(&channel);
                 self.pg_listener
-                    .unlisten_many(self.client_id, &[channel.clone()])
+                    .unlisten_many(self.client_id, from_ref(&channel))
                     .await
                     .context("Failed to unsubscribe from channel")?;
 

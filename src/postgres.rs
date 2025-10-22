@@ -239,7 +239,7 @@ mod tests {
             let (tx, _rx) = mpsc::channel(10);
 
             listener
-                .listen_many(1, &[channel.clone()], tx)
+                .listen_many(1, from_ref(&channel), tx)
                 .await
                 .unwrap();
 
@@ -346,16 +346,16 @@ mod tests {
 
             // Both clients listen
             listener
-                .listen_many(1, &[channel.clone()], tx1)
+                .listen_many(1, from_ref(&channel), tx1)
                 .await
                 .unwrap();
             listener
-                .listen_many(2, &[channel.clone()], tx2)
+                .listen_many(2, from_ref(&channel), tx2)
                 .await
                 .unwrap();
 
             // Client 1 unlistens
-            listener.unlisten_many(1, &[channel.clone()]).await.unwrap();
+            listener.unlisten_many(1, from_ref(&channel)).await.unwrap();
 
             // Client 2 should still be subscribed
             let channels_arc = listener.channels();
@@ -380,7 +380,7 @@ mod tests {
             let (tx, mut rx) = mpsc::channel(10);
 
             listener
-                .listen_many(1, &[channel.clone()], tx)
+                .listen_many(1, from_ref(&channel), tx)
                 .await
                 .unwrap();
 
@@ -547,12 +547,12 @@ mod tests {
             let (tx, mut rx) = mpsc::channel(10);
 
             listener
-                .listen_many(1, &[channel.clone()], tx.clone())
+                .listen_many(1, from_ref(&channel), tx.clone())
                 .await
                 .unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            listener.unlisten_many(1, &[channel.clone()]).await.unwrap();
+            listener.unlisten_many(1, from_ref(&channel)).await.unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             // Send notification after unlistening
@@ -576,11 +576,11 @@ mod tests {
             let (tx2, mut rx2) = mpsc::channel(10);
 
             listener
-                .listen_many(1, &[channel1.clone()], tx1)
+                .listen_many(1, from_ref(&channel1), tx1)
                 .await
                 .unwrap();
             listener
-                .listen_many(2, &[channel2.clone()], tx2)
+                .listen_many(2, from_ref(&channel2), tx2)
                 .await
                 .unwrap();
 
