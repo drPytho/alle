@@ -64,6 +64,8 @@ async fn sse_handler(
     State(state): State<HttpPushServerState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (sender, receiver) = tokio::sync::mpsc::channel(32);
+
+    tracing::debug!("Request received for channels: {}", &channels.channels);
     let client_id = state
         .client_id_counter
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -81,12 +83,16 @@ async fn sse_handler(
         })
         .collect();
 
+    tracing::debug!("Channels extracted: {:?}", &channels);
+
     // Subscribe to all valid channels
     state
         .pg_notify
         .listen_many(client_id, &channels, sender.clone())
         .await
         .expect("Should be able to send message");
+
+    tracing::debug!("Channels listened to: {:?}", &channels);
 
     let drop_channels = channels.clone();
 
@@ -113,6 +119,7 @@ async fn sse_handler(
             .expect("Should be able to send message");
     });
 
+    tracing::debug!("Stream generated listened to: {:?}", &channels);
     Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(30))

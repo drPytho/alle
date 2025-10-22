@@ -189,7 +189,7 @@ impl WebSocketClient {
             ClientMessage::Subscribe { channel } => {
                 self.channels.insert(channel.clone());
                 self.pg_listener
-                    .listen(self.client_id, channel.clone(), chan.clone())
+                    .listen_many(self.client_id, &[channel.clone()], chan.clone())
                     .await
                     .context("Failed to subscribe to channel")?;
 
@@ -199,7 +199,7 @@ impl WebSocketClient {
             ClientMessage::Unsubscribe { channel } => {
                 self.channels.remove(&channel);
                 self.pg_listener
-                    .unlisten(self.client_id, channel.clone())
+                    .unlisten_many(self.client_id, &[channel.clone()])
                     .await
                     .context("Failed to unsubscribe from channel")?;
 

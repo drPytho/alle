@@ -24,6 +24,9 @@ run-release *ARGS:
 test:
     cargo test
 
+test_one *ARGS:
+    cargo test -- {{ARGS}}
+
 # Run tests with output
 test-verbose:
     cargo test -- --nocapture

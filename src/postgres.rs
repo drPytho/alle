@@ -55,30 +55,35 @@ impl PostgresListener {
                         );
 
                         let channel_map_guard = channel_map.read().await;
+                        tracing::info!("got read lock");
 
                         if let Some(set) = channel_map_guard.get(&channel) {
                             let mut dead_ids = Vec::new();
 
                             for (id, chan) in set.iter() {
+                                tracing::info!("sending");
                                 if let Err(e) = chan.send(msg.clone()).await {
                                     tracing::warn!("Receiver {} disconnected: {}", id, e);
                                     dead_ids.push(*id);
                                 }
+                                tracing::info!("sent");
                             }
 
                             drop(channel_map_guard); // Release read lock
 
                             if !dead_ids.is_empty() {
                                 let mut channel_map_guard = channel_map.write().await;
-                                if let Some(set) = channel_map_guard.get_mut(&channel) {
+                                if let Some(client_map) = channel_map_guard.get_mut(&channel) {
                                     for id in dead_ids {
-                                        set.remove(&id);
+                                        client_map.remove(&id);
                                     }
                                 }
                             }
                         }
                     }
-                    Ok(_) => {}
+                    Ok(other) => {
+                        tracing::warn!("Other returned {:?} ", other);
+                    }
                     Err(e) => {
                         tracing::error!("PostgreSQL connection error: {}", e);
                         break;
@@ -90,71 +95,68 @@ impl PostgresListener {
         Ok(Self { client, channels })
     }
 
-    pub async fn listen(
-        &self,
-        client_id: u64,
-        channel: ChannelName,
-        chan: Sender<NotificationMessage>,
-    ) -> Result<()> {
-        let mut channels = self.channels.write().await;
-
-        let client_ids = channels.entry(channel.clone()).or_insert_with(HashMap::new);
-        if client_ids.is_empty() {
-            self.execute_listen(&channel).await?;
-        }
-        client_ids.insert(client_id, chan);
-
-        Ok(())
-    }
-
-    pub async fn unlisten(&self, client_id: u64, channel: ChannelName) -> Result<()> {
-        let mut channels = self.channels.write().await;
-
-        let client_ids = channels.entry(channel.clone()).or_insert_with(HashMap::new);
-        client_ids.remove(&client_id);
-        if client_ids.is_empty() {
-            self.execute_unlisten(&channel).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Subscribe to multiple channels at once (more efficient than calling listen multiple times)
+    /// Subscribe to multiple channels at once
     pub async fn listen_many(
         &self,
         client_id: u64,
         channels_to_subscribe: &[ChannelName],
         chan: Sender<NotificationMessage>,
     ) -> Result<()> {
-        let mut channels = self.channels.write().await;
+        tracing::debug!("Pre lock");
 
-        for channel in channels_to_subscribe {
-            let client_ids = channels.entry(channel.clone()).or_insert_with(HashMap::new);
-            let needs_listen = client_ids.is_empty();
-            client_ids.insert(client_id, chan.clone());
+        // Collect which channels need LISTEN command while holding lock
+        let channels_needing_listen = {
+            let mut channels = self.channels.write().await;
+            tracing::debug!("Post lock");
 
-            if needs_listen {
-                self.execute_listen(channel).await?;
+            let mut needs_listen = Vec::new();
+            for channel in channels_to_subscribe {
+                let client_ids = channels.entry(channel.clone()).or_insert_with(HashMap::new);
+                if client_ids.is_empty() {
+                    needs_listen.push(channel.clone());
+                }
+                client_ids.insert(client_id, chan.clone());
             }
+            needs_listen
+        }; // Lock released here
+
+        // Execute LISTEN commands outside the lock to avoid deadlock
+        for channel in channels_needing_listen {
+            self.execute_listen(&channel).await?;
         }
 
         Ok(())
     }
 
-    /// Unsubscribe from multiple channels at once (more efficient than calling unlisten multiple times)
+    /// Unsubscribe from multiple channels at once
     pub async fn unlisten_many(
         &self,
         client_id: u64,
         channels_to_unsubscribe: &[ChannelName],
     ) -> Result<()> {
-        let mut channels = self.channels.write().await;
+        // Collect which channels need UNLISTEN command while holding lock
+        let channels_needing_unlisten = {
+            let mut channels = self.channels.write().await;
 
-        for channel in channels_to_unsubscribe {
-            let client_ids = channels.entry(channel.clone()).or_insert_with(HashMap::new);
-            client_ids.remove(&client_id);
+            let mut needs_unlisten = Vec::new();
+            for channel in channels_to_unsubscribe {
+                let client_ids = channels.entry(channel.clone()).or_insert_with(HashMap::new);
+                client_ids.remove(&client_id);
 
-            if client_ids.is_empty() {
-                self.execute_unlisten(channel).await?;
+                if client_ids.is_empty() {
+                    needs_unlisten.push(channel.clone());
+                }
+            }
+            needs_unlisten
+        }; // Lock released here
+
+        // Execute UNLISTEN commands outside the lock to avoid deadlock
+
+        let channels = self.channels.read().await;
+        for channel in channels_needing_unlisten {
+            let empty = channels.get(&channel).is_none_or(|v| v.is_empty());
+            if empty {
+                self.execute_unlisten(&channel).await?;
             }
         }
 
@@ -184,7 +186,7 @@ impl PostgresListener {
 
     /// Send a notification to a channel (NOTIFY)
     pub async fn notify(&self, channel: &ChannelName, payload: &str) -> Result<()> {
-        tracing::debug!("Channer: {}, Payload: {}", channel, payload);
+        tracing::debug!("Sendign on channel: {}, Payload: {}", channel, payload);
         let channel_str = channel.as_str();
         if let Err(e) = self
             .client
@@ -225,6 +227,8 @@ mod tests {
 
     // Unit tests for internal state management
     mod unit_tests {
+        use std::slice::from_ref;
+
         use super::*;
 
         #[tokio::test]
@@ -234,7 +238,10 @@ mod tests {
             let channel = ChannelName::new("test_channel").unwrap();
             let (tx, _rx) = mpsc::channel(10);
 
-            listener.listen(1, channel.clone(), tx).await.unwrap();
+            listener
+                .listen_many(1, &[channel.clone()], tx)
+                .await
+                .unwrap();
 
             let channels_arc = listener.channels();
             let channels = channels_arc.read().await;
@@ -250,8 +257,14 @@ mod tests {
             let (tx1, _rx1) = mpsc::channel(10);
             let (tx2, _rx2) = mpsc::channel(10);
 
-            listener.listen(1, channel.clone(), tx1).await.unwrap();
-            listener.listen(2, channel.clone(), tx2).await.unwrap();
+            listener
+                .listen_many(1, from_ref(&channel), tx1)
+                .await
+                .unwrap();
+            listener
+                .listen_many(2, from_ref(&channel), tx2)
+                .await
+                .unwrap();
 
             let channels_arc = listener.channels();
             let channels = channels_arc.read().await;
@@ -268,8 +281,11 @@ mod tests {
             let channel = ChannelName::new("test_channel").unwrap();
             let (tx, _rx) = mpsc::channel(10);
 
-            listener.listen(1, channel.clone(), tx).await.unwrap();
-            listener.unlisten(1, channel.clone()).await.unwrap();
+            listener
+                .listen_many(1, from_ref(&channel), tx)
+                .await
+                .unwrap();
+            listener.unlisten_many(1, from_ref(&channel)).await.unwrap();
 
             let channels_arc = listener.channels();
             let channels = channels_arc.read().await;
@@ -329,11 +345,17 @@ mod tests {
             let (tx2, _rx2) = mpsc::channel(10);
 
             // Both clients listen
-            listener.listen(1, channel.clone(), tx1).await.unwrap();
-            listener.listen(2, channel.clone(), tx2).await.unwrap();
+            listener
+                .listen_many(1, &[channel.clone()], tx1)
+                .await
+                .unwrap();
+            listener
+                .listen_many(2, &[channel.clone()], tx2)
+                .await
+                .unwrap();
 
             // Client 1 unlistens
-            listener.unlisten(1, channel.clone()).await.unwrap();
+            listener.unlisten_many(1, &[channel.clone()]).await.unwrap();
 
             // Client 2 should still be subscribed
             let channels_arc = listener.channels();
@@ -347,7 +369,7 @@ mod tests {
     // Integration tests for notification flow
     mod integration_tests {
         use super::*;
-        use std::time::Duration;
+        use std::{slice::from_ref, time::Duration};
         use tokio::time::timeout;
 
         #[tokio::test]
@@ -357,7 +379,10 @@ mod tests {
             let channel = ChannelName::new("test_notify").unwrap();
             let (tx, mut rx) = mpsc::channel(10);
 
-            listener.listen(1, channel.clone(), tx).await.unwrap();
+            listener
+                .listen_many(1, &[channel.clone()], tx)
+                .await
+                .unwrap();
 
             // Give some time for subscription to be established
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -376,6 +401,106 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn test_many_connect_disconnect() {
+            console_subscriber::init();
+            let db_url = get_test_db_url!();
+            let listener = Arc::new(PostgresListener::connect(&db_url).await.unwrap());
+
+            const NUM_CLIENTS: u64 = 200;
+            const NUM_CYCLES: usize = 20;
+            const NUM_NOTIFIERS: usize = 10;
+
+            let mut handles = vec![];
+
+            // Spawn client tasks that repeatedly connect and disconnect
+            for client_id in 0..NUM_CLIENTS {
+                let listener_clone = listener.clone();
+
+                let handle = tokio::spawn(async move {
+                    for cycle in 0..NUM_CYCLES {
+                        let (tx, mut rx) = mpsc::channel(100);
+                        let channel_clone =
+                            ChannelName::new(format!("streas_test_{}_{}", client_id, cycle))
+                                .unwrap();
+                        // Listen
+                        tracing::info!("Listen {} {}", client_id, cycle);
+                        if let Err(e) = listener_clone
+                            .listen_many(client_id, from_ref(&channel_clone), tx)
+                            .await
+                        {
+                            eprintln!(
+                                "Client {} failed to listen on cycle {}: {}",
+                                client_id, cycle, e
+                            );
+                            continue;
+                        }
+
+                        // Small random delay to create timing variations
+                        tokio::time::sleep(Duration::from_millis(client_id % 10)).await;
+
+                        tracing::info!("Receive {} {}", client_id, cycle);
+                        // Try to receive a message (with short timeout)
+                        let _ = timeout(Duration::from_millis(50), rx.recv()).await;
+
+                        tracing::info!("Unlisten {} {}", client_id, cycle);
+                        // Unlisten
+                        if let Err(e) = listener_clone
+                            .unlisten_many(client_id, from_ref(&channel_clone))
+                            .await
+                        {
+                            eprintln!(
+                                "Client {} failed to unlisten on cycle {}: {}",
+                                client_id, cycle, e
+                            );
+                        }
+
+                        tracing::info!("Done {} {}", client_id, cycle);
+                        // Small delay before next cycle
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                });
+
+                handles.push(handle);
+            }
+
+            // Spawn notifier tasks that continuously send notifications
+            for notifier_id in 0..NUM_NOTIFIERS {
+                let listener_clone = listener.clone();
+
+                let handle = tokio::spawn(async move {
+                    for cycle in 0..NUM_CYCLES * 5 {
+                        let channel_clone =
+                            ChannelName::new(format!("streas_test_{}_{}", notifier_id, cycle))
+                                .unwrap();
+
+                        let payload = format!("notifier_{}_msg_{}", notifier_id, cycle);
+                        if let Err(e) = listener_clone.notify(&channel_clone, &payload).await {
+                            eprintln!(
+                                "Notifier {} failed to send notification {}: {}",
+                                notifier_id, cycle, e
+                            );
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                });
+
+                handles.push(handle);
+            }
+
+            // Wait for all tasks with a timeout to detect deadlocks
+            let join_all = async {
+                for handle in handles {
+                    handle.await.expect("Task panicked");
+                }
+            };
+
+            match timeout(Duration::from_secs(30), join_all).await {
+                Ok(_) => println!("Stress test completed successfully"),
+                Err(_) => panic!("Stress test timed out - possible deadlock detected!"),
+            }
+        }
+
+        #[tokio::test]
         async fn test_multiple_clients_receive_same_notification() {
             let db_url = get_test_db_url!();
             let listener = PostgresListener::connect(&db_url).await.unwrap();
@@ -383,8 +508,14 @@ mod tests {
             let (tx1, mut rx1) = mpsc::channel(10);
             let (tx2, mut rx2) = mpsc::channel(10);
 
-            listener.listen(1, channel.clone(), tx1).await.unwrap();
-            listener.listen(2, channel.clone(), tx2).await.unwrap();
+            listener
+                .listen_many(1, from_ref(&channel), tx1)
+                .await
+                .unwrap();
+            listener
+                .listen_many(2, from_ref(&channel), tx2)
+                .await
+                .unwrap();
 
             tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -416,12 +547,12 @@ mod tests {
             let (tx, mut rx) = mpsc::channel(10);
 
             listener
-                .listen(1, channel.clone(), tx.clone())
+                .listen_many(1, &[channel.clone()], tx.clone())
                 .await
                 .unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            listener.unlisten(1, channel.clone()).await.unwrap();
+            listener.unlisten_many(1, &[channel.clone()]).await.unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             // Send notification after unlistening
@@ -444,8 +575,14 @@ mod tests {
             let (tx1, mut rx1) = mpsc::channel(10);
             let (tx2, mut rx2) = mpsc::channel(10);
 
-            listener.listen(1, channel1.clone(), tx1).await.unwrap();
-            listener.listen(2, channel2.clone(), tx2).await.unwrap();
+            listener
+                .listen_many(1, &[channel1.clone()], tx1)
+                .await
+                .unwrap();
+            listener
+                .listen_many(2, &[channel2.clone()], tx2)
+                .await
+                .unwrap();
 
             tokio::time::sleep(Duration::from_millis(100)).await;
 
