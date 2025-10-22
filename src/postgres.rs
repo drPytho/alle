@@ -1,9 +1,10 @@
+use core::panic;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc::Sender, RwLock};
 
 use anyhow::{Context, Result};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt, TryStreamExt};
 use tokio_postgres::{AsyncMessage, Client, NoTls};
 
 use crate::{ChannelName, NotificationMessage};
@@ -29,12 +30,23 @@ impl PostgresListener {
         // Spawn a task to handle connection and notifications
         let channel_map = channels.clone();
 
-        tokio::spawn(async move {
-            let mut stream = futures::stream::poll_fn(move |cx| connection.poll_message(cx));
+        // Make transmitter and receiver.
+        //futures_channel
+        let (tx, mut rx) = futures_channel::mpsc::unbounded();
 
-            while let Some(message) = stream.next().await {
-                match message {
-                    Ok(AsyncMessage::Notification(notif)) => {
+        let stream = futures::stream::poll_fn(move |cx| connection.poll_message(cx))
+            .map_err(|e| panic!("{:?}", e));
+
+        let connection = stream.forward(tx);
+
+        tokio::spawn(connection);
+
+        tokio::spawn(async move {
+            // let mut stream = futures::stream::poll_fn(move |cx| connection.poll_message(cx));
+
+            while let Some(v) = rx.next().await {
+                match v {
+                    AsyncMessage::Notification(notif) => {
                         // Parse channel name - this should always succeed since Postgres validated it
                         let channel = match ChannelName::new(notif.channel()) {
                             Ok(ch) => ch,
@@ -78,15 +90,69 @@ impl PostgresListener {
                             }
                         }
                     }
-                    Ok(other) => {
-                        tracing::warn!("Other returned {:?} ", other);
+                    AsyncMessage::Notice(e) => {
+                        panic!("Some notice e {:?}", e)
                     }
-                    Err(e) => {
-                        tracing::error!("PostgreSQL connection error: {}", e);
-                        break;
-                    }
+
+                    _ => todo!(),
                 }
             }
+
+            // while let Some(message) = rx.next().await {
+            //     match message {
+            //         Ok(AsyncMessage::Notification(notif)) => {
+            //             // Parse channel name - this should always succeed since Postgres validated it
+            //             let channel = match ChannelName::new(notif.channel()) {
+            //                 Ok(ch) => ch,
+            //                 Err(e) => {
+            //                     tracing::error!("Invalid channel name from Postgres: {}", e);
+            //                     continue;
+            //                 }
+            //             };
+            //
+            //             let msg = NotificationMessage {
+            //                 channel: channel.clone(),
+            //                 payload: notif.payload().to_string(),
+            //             };
+            //             tracing::debug!(
+            //                 "Received notification on channel '{}': {}",
+            //                 msg.channel,
+            //                 msg.payload
+            //             );
+            //
+            //             let channel_map_guard = channel_map.read().await;
+            //
+            //             if let Some(set) = channel_map_guard.get(&channel) {
+            //                 let mut dead_ids = Vec::new();
+            //
+            //                 for (id, chan) in set.iter() {
+            //                     if let Err(e) = chan.send(msg.clone()).await {
+            //                         tracing::warn!("Receiver {} disconnected: {}", id, e);
+            //                         dead_ids.push(*id);
+            //                     }
+            //                 }
+            //
+            //                 drop(channel_map_guard); // Release read lock
+            //
+            //                 if !dead_ids.is_empty() {
+            //                     let mut channel_map_guard = channel_map.write().await;
+            //                     if let Some(client_map) = channel_map_guard.get_mut(&channel) {
+            //                         for id in dead_ids {
+            //                             client_map.remove(&id);
+            //                         }
+            //                     }
+            //                 }
+            //             }
+            //         }
+            //         Ok(other) => {
+            //             tracing::warn!("Other returned {:?} ", other);
+            //         }
+            //         Err(e) => {
+            //             tracing::error!("PostgreSQL connection error: {}", e);
+            //             break;
+            //         }
+            //     }
+            // }
         });
 
         Ok(Self { client, channels })
@@ -150,17 +216,17 @@ impl PostgresListener {
         // Execute UNLISTEN commands outside the lock to avoid deadlock
 
         // TODO: We really want a lock around unlisten
-        // let channels = self.channels.read().await;
-        // for channel in channels_needing_unlisten {
-        //     let empty = channels.get(&channel).is_none_or(|v| v.is_empty());
-        //     if empty {
-        //         self.execute_unlisten(&channel).await?;
-        //     }
-        // }
-
+        let channels = self.channels.read().await;
         for channel in channels_needing_unlisten {
-            self.execute_unlisten(&channel).await?;
+            let empty = channels.get(&channel).is_none_or(|v| v.is_empty());
+            if empty {
+                self.execute_unlisten(&channel).await?;
+            }
         }
+
+        // for channel in channels_needing_unlisten {
+        //     self.execute_unlisten(&channel).await?;
+        // }
 
         Ok(())
     }
@@ -404,7 +470,6 @@ mod tests {
 
         #[tokio::test]
         async fn test_many_connect_disconnect() {
-            console_subscriber::init();
             let db_url = get_test_db_url!();
             let listener = Arc::new(PostgresListener::connect(&db_url).await.unwrap());
 
