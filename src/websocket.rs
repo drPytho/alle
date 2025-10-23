@@ -235,10 +235,7 @@ impl WebSocketClient {
                             }
                         }
                         Err(e) => {
-                            error!(
-                                "Client {} authentication error: {}",
-                                self.client_id, e
-                            );
+                            error!("Client {} authentication error: {}", self.client_id, e);
                             self.send(ServerMessage::Error {
                                 message: format!("Authentication error: {}", e),
                             })

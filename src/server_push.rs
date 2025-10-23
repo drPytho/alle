@@ -84,28 +84,23 @@ async fn sse_handler(
     // If authenticator is configured, verify the token
     if let Some(auth) = &state.auth {
         match auth_token {
-            Some(TypedHeader(auth_header)) => {
-                match auth.authenticate(auth_header.token()).await {
-                    Ok(result) => {
-                        if !result.authenticated {
-                            tracing::warn!("SSE authentication failed");
-                            return Err((StatusCode::UNAUTHORIZED, "Authentication failed"));
-                        } else {
-                            tracing::debug!(
-                                "SSE authentication successful for user: {}",
-                                result.user_id
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("SSE authentication error: {}", e);
-                        return Err((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "Authentication error",
-                        ));
+            Some(TypedHeader(auth_header)) => match auth.authenticate(auth_header.token()).await {
+                Ok(result) => {
+                    if !result.authenticated {
+                        tracing::warn!("SSE authentication failed");
+                        return Err((StatusCode::UNAUTHORIZED, "Authentication failed"));
+                    } else {
+                        tracing::debug!(
+                            "SSE authentication successful for user: {}",
+                            result.user_id
+                        );
                     }
                 }
-            }
+                Err(e) => {
+                    tracing::error!("SSE authentication error: {}", e);
+                    return Err((StatusCode::INTERNAL_SERVER_ERROR, "Authentication error"));
+                }
+            },
             None => {
                 tracing::warn!("SSE request missing authentication token");
                 return Err((StatusCode::UNAUTHORIZED, "Authentication required"));
