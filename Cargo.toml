@@ -1,7 +1,14 @@
 [package]
-name = "alle"
-version = "0.1.0"
-edition = "2021"
+name = "pit-alle"
+version = "0.0.1"
+edition = "2024"
+authors = ["Filip Lindvall"]
+readme = "README.md"
+repository = "https://github.com/drpytho/alle"
+license = "MIT"
+description = "A message bridge between Postgres Listen notifty and SSE/WS"
+
+exclude = ["sse_listener.py", "Dockerfile", "docker-compose.yml", "init.sql"]
 
 [lib]
 name = "alle"
