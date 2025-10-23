@@ -5,35 +5,15 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  create-release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      version: ${{ steps.get_version.outputs.version }}
-    steps:
-      - name: Get version from tag
-        id: get_version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
-          draft: false
-          prerelease: false
-
   build-release:
     name: Build Release
-    needs: create-release
     strategy:
       matrix:
         include:
@@ -117,16 +97,6 @@ jobs:
           7z a ../../../${{ matrix.name }} alle.exe
           cd -
 
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./${{ matrix.name }}
-          asset_name: ${{ matrix.name }}
-          asset_content_type: application/octet-stream
-
       - name: Generate SHA256 checksums (Unix)
         if: matrix.os != 'windows-latest'
         run: |
@@ -137,12 +107,21 @@ jobs:
         run: |
           certutil -hashfile ${{ matrix.name }} SHA256 > ${{ matrix.name }}.sha256
 
-      - name: Upload checksum
-        uses: actions/upload-release-asset@v1
+      - name: Upload Release Assets
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./${{ matrix.name }}.sha256
-          asset_name: ${{ matrix.name }}.sha256
-          asset_content_type: text/plain
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Extract version from tag
+          VERSION=${GITHUB_REF#refs/tags/}
+
+          # Create release if it doesn't exist (first job to finish creates it)
+          if ! gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release create "$VERSION" \
+              --title "Release $VERSION" \
+              --notes "Release $VERSION" \
+              --draft=false \
+              --prerelease=false
+          fi
+
+          # Upload assets
+          gh release upload "$VERSION" "${{ matrix.name }}" "${{ matrix.name }}.sha256" --clobber
