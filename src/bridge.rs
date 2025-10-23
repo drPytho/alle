@@ -4,8 +4,8 @@ use tokio::sync::mpsc::Sender;
 use tracing::info;
 
 use crate::{
-    server_push::server, BridgeConfig, ChannelName, NotificationMessage, PostgresListener,
-    WebSocketServer,
+    auth::Authenticator, server_push::server, BridgeConfig, ChannelName, NotificationMessage,
+    PostgresListener, WebSocketServer,
 };
 
 /// Main bridge that connects Postgres NOTIFY with WebSocket clients
@@ -57,6 +57,19 @@ impl Bridge {
         let pg_listener = PostgresListener::connect(&self.config.postgres_url).await?;
         let pg_listener = Arc::new(pg_listener);
 
+        // Create authenticator if auth config is provided
+        let authenticator = if let Some(auth_config) = self.config.auth_config {
+            info!(
+                "Authentication enabled with function: {}",
+                auth_config.pg_function
+            );
+            let auth = Authenticator::new(&self.config.postgres_url, auth_config).await?;
+            Some(Arc::new(auth))
+        } else {
+            info!("Authentication disabled");
+            None
+        };
+
         // Create subscription manager
 
         // Spawn task to handle subscription events (dynamic LISTEN/UNLISTEN)
@@ -72,28 +85,31 @@ impl Bridge {
                 let se_addr = se_addr.clone();
                 let pg_listener_ws = Arc::clone(&pg_listener);
                 let pg_listener_se = Arc::clone(&pg_listener);
+                let auth_ws = authenticator.clone();
+                let auth_se = authenticator.clone();
 
                 // Run both servers concurrently
                 tokio::try_join!(
                     async move {
                         info!("WebSocket server starting");
-                        let ws_server = WebSocketServer::new(ws_addr, pg_listener_ws);
+                        let ws_server = WebSocketServer::new(ws_addr, pg_listener_ws, auth_ws);
                         ws_server.start().await
                     },
                     async move {
                         info!("Server-Side Events server starting");
-                        server(se_addr, pg_listener_se, None).await
+                        server(se_addr, pg_listener_se, auth_se).await
                     }
                 )?;
             }
             (Some(ws_addr), None) => {
                 info!("WebSocket server path");
-                let ws_server = WebSocketServer::new(ws_addr.clone(), Arc::clone(&pg_listener));
+                let ws_server =
+                    WebSocketServer::new(ws_addr.clone(), Arc::clone(&pg_listener), authenticator);
                 ws_server.start().await?;
             }
             (None, Some(se_addr)) => {
                 info!("Server-Side Events server path");
-                server(se_addr.clone(), Arc::clone(&pg_listener), None).await?;
+                server(se_addr.clone(), Arc::clone(&pg_listener), authenticator).await?;
             }
             (None, None) => {
                 return Err(anyhow::anyhow!(

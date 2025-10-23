@@ -11,23 +11,29 @@ use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    ChannelName, ClientId, ClientMessage, NotificationMessage, PostgresListener, ServerMessage,
+    auth::Authenticator, ChannelName, ClientId, ClientMessage, NotificationMessage,
+    PostgresListener, ServerMessage,
 };
 
 /// WebSocket server that handles client connections
 pub struct WebSocketServer {
     bind_addr: String,
     pg_listener: Arc<PostgresListener>,
-
+    authenticator: Option<Arc<Authenticator>>,
     next_client_id: u64,
 }
 
 impl WebSocketServer {
     /// Create a new WebSocket server
-    pub fn new(bind_addr: String, pg_listener: Arc<PostgresListener>) -> Self {
+    pub fn new(
+        bind_addr: String,
+        pg_listener: Arc<PostgresListener>,
+        authenticator: Option<Arc<Authenticator>>,
+    ) -> Self {
         Self {
             bind_addr,
             pg_listener,
+            authenticator,
             next_client_id: 0,
         }
     }
@@ -48,15 +54,18 @@ impl WebSocketServer {
             let client_id = self.next_client_id;
             self.next_client_id += 1;
             let pg_listener = Arc::clone(&self.pg_listener);
+            let authenticator = self.authenticator.clone();
 
             tokio::spawn(async move {
-                let mut client = match WebSocketClient::new(client_id, stream, pg_listener).await {
-                    Ok(client) => client,
-                    Err(err) => {
-                        error!("Error instanciating the connection to {}: {}", addr, err);
-                        return;
-                    }
-                };
+                let mut client =
+                    match WebSocketClient::new(client_id, stream, pg_listener, authenticator).await
+                    {
+                        Ok(client) => client,
+                        Err(err) => {
+                            error!("Error instanciating the connection to {}: {}", addr, err);
+                            return;
+                        }
+                    };
 
                 if let Err(e) = client.handle_connection().await {
                     error!("Error handling connection from {}: {}", addr, e);
@@ -71,6 +80,8 @@ struct WebSocketClient {
     ws_stream: WebSocketStream<TcpStream>,
     client_id: ClientId,
     pg_listener: Arc<PostgresListener>,
+    authenticator: Option<Arc<Authenticator>>,
+    authenticated: bool,
 }
 
 impl WebSocketClient {
@@ -78,16 +89,22 @@ impl WebSocketClient {
         client_id: ClientId,
         stream: TcpStream,
         pg_listener: Arc<PostgresListener>,
+        authenticator: Option<Arc<Authenticator>>,
     ) -> Result<Self> {
         let ws_stream = accept_async(stream)
             .await
             .context("Failed to accept WebSocket connection")?;
+
+        // If no authenticator is configured, consider the client authenticated
+        let authenticated = authenticator.is_none();
 
         Ok(Self {
             channels: HashSet::new(),
             ws_stream,
             client_id,
             pg_listener,
+            authenticator,
+            authenticated,
         })
     }
     async fn handle_connection(&mut self) -> Result<()> {
@@ -194,7 +211,67 @@ impl WebSocketClient {
             serde_json::from_str(text).context("Failed to parse client message")?;
 
         match client_msg {
+            ClientMessage::Authenticate { token } => {
+                // If authenticator is configured, verify the token
+                if let Some(ref auth) = self.authenticator {
+                    match auth.authenticate(&token).await {
+                        Ok(result) => {
+                            if result.authenticated {
+                                self.authenticated = true;
+                                info!(
+                                    "Client {} authenticated as user: {}",
+                                    self.client_id, result.user_id
+                                );
+                                self.send(ServerMessage::Authenticated {
+                                    user_id: result.user_id,
+                                })
+                                .await?;
+                            } else {
+                                warn!("Client {} authentication failed", self.client_id);
+                                self.send(ServerMessage::Error {
+                                    message: "Authentication failed".to_string(),
+                                })
+                                .await?;
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "Client {} authentication error: {}",
+                                self.client_id, e
+                            );
+                            self.send(ServerMessage::Error {
+                                message: format!("Authentication error: {}", e),
+                            })
+                            .await?;
+                        }
+                    }
+                } else {
+                    // No authenticator configured, authentication not required
+                    warn!(
+                        "Client {} sent authenticate message but no authenticator is configured",
+                        self.client_id
+                    );
+                    self.send(ServerMessage::Error {
+                        message: "Authentication not configured".to_string(),
+                    })
+                    .await?;
+                }
+            }
+
             ClientMessage::Subscribe { channel } => {
+                // Check if authentication is required and client is not authenticated
+                if !self.authenticated {
+                    warn!(
+                        "Client {} attempted to subscribe without authentication",
+                        self.client_id
+                    );
+                    return self
+                        .send(ServerMessage::Error {
+                            message: "Authentication required".to_string(),
+                        })
+                        .await;
+                }
+
                 self.channels.insert(channel.clone());
                 self.pg_listener
                     .listen_many(self.client_id, from_ref(&channel), chan.clone())
@@ -205,6 +282,19 @@ impl WebSocketClient {
             }
 
             ClientMessage::Unsubscribe { channel } => {
+                // Check if authentication is required and client is not authenticated
+                if !self.authenticated {
+                    warn!(
+                        "Client {} attempted to unsubscribe without authentication",
+                        self.client_id
+                    );
+                    return self
+                        .send(ServerMessage::Error {
+                            message: "Authentication required".to_string(),
+                        })
+                        .await;
+                }
+
                 self.channels.remove(&channel);
                 self.pg_listener
                     .unlisten_many(self.client_id, from_ref(&channel))
@@ -215,6 +305,19 @@ impl WebSocketClient {
             }
 
             ClientMessage::Notify { channel, payload } => {
+                // Check if authentication is required and client is not authenticated
+                if !self.authenticated {
+                    warn!(
+                        "Client {} attempted to notify without authentication",
+                        self.client_id
+                    );
+                    return self
+                        .send(ServerMessage::Error {
+                            message: "Authentication required".to_string(),
+                        })
+                        .await;
+                }
+
                 self.pg_listener
                     .notify(&channel, &payload)
                     .await

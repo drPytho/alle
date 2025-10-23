@@ -1,4 +1,4 @@
-use alle::{Bridge, BridgeConfig, Frontend};
+use alle::{auth::AuthConfig, Bridge, BridgeConfig, Frontend};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -29,6 +29,12 @@ struct Args {
         default_value = "alle=info,info"
     )]
     log_level: String,
+
+    /// PostgreSQL authentication function name (optional)
+    /// If provided, clients must authenticate before subscribing to channels
+    /// The function should accept a token and return (user_id TEXT, authenticated BOOLEAN)
+    #[arg(long, global = true, env = "AUTH_FUNCTION")]
+    auth_function: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -94,7 +100,7 @@ async fn main() -> Result<()> {
                 frontend = frontend.with_server_push(addr);
             }
 
-            run_server(args.postgres_url, frontend, channels).await?;
+            run_server(args.postgres_url, frontend, channels, args.auth_function).await?;
         }
     }
 
@@ -106,6 +112,7 @@ async fn run_server(
     postgres_url: String,
     frontend: Frontend,
     _channels: Vec<String>,
+    auth_function: Option<String>,
 ) -> Result<()> {
     tracing::info!("Starting Alle WebSocket-Postgres bridge");
     tracing::info!("PostgreSQL: {}", postgres_url);
@@ -117,7 +124,17 @@ async fn run_server(
         tracing::info!("Server-Side Events: {}", addr);
     }
 
-    let config = BridgeConfig::new(postgres_url, frontend);
+    if let Some(ref func) = auth_function {
+        tracing::info!("Authentication: enabled (function: {})", func);
+    } else {
+        tracing::info!("Authentication: disabled");
+    }
+
+    let mut config = BridgeConfig::new(postgres_url, frontend);
+    if let Some(func) = auth_function {
+        config = config.with_auth(AuthConfig::new(func));
+    }
+
     let bridge = Bridge::new(config);
     bridge.run().await?;
 

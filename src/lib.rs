@@ -133,6 +133,8 @@ pub struct NotifyMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
+    /// Authenticate with a token
+    Authenticate { token: String },
     /// Subscribe to a channel
     Subscribe { channel: ChannelName },
     /// Unsubscribe from a channel
@@ -157,6 +159,8 @@ pub enum ServerMessage {
     Subscribed { channel: ChannelName },
     /// Unsubscription confirmed
     Unsubscribed { channel: ChannelName },
+    /// Authentication successful
+    Authenticated { user_id: String },
     /// Error message
     Error { message: String },
 }

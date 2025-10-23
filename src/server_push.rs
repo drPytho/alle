@@ -1,6 +1,8 @@
 use axum::{
     extract::{Query, State},
+    http::StatusCode,
     response::sse::{Event, Sse},
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
@@ -78,20 +80,35 @@ async fn sse_handler(
     channels: Query<Channels>,
     auth_token: Option<TypedHeader<Authorization<Bearer>>>,
     State(state): State<HttpPushServerState>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, impl IntoResponse> {
+    // If authenticator is configured, verify the token
     if let Some(auth) = &state.auth {
-        if let Some(TypedHeader(auth_header)) = auth_token {
-            match auth.authenticate(auth_header.token()).await {
-                Ok(result) => {
-                    if !result.authenticated {
-                        tracing::warn!("Authentication failed for token");
-                    } else {
-                        tracing::debug!("Authentication successful for user: {}", result.user_id);
+        match auth_token {
+            Some(TypedHeader(auth_header)) => {
+                match auth.authenticate(auth_header.token()).await {
+                    Ok(result) => {
+                        if !result.authenticated {
+                            tracing::warn!("SSE authentication failed");
+                            return Err((StatusCode::UNAUTHORIZED, "Authentication failed"));
+                        } else {
+                            tracing::debug!(
+                                "SSE authentication successful for user: {}",
+                                result.user_id
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("SSE authentication error: {}", e);
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Authentication error",
+                        ));
                     }
                 }
-                Err(e) => {
-                    tracing::error!("Authentication error: {}", e);
-                }
+            }
+            None => {
+                tracing::warn!("SSE request missing authentication token");
+                return Err((StatusCode::UNAUTHORIZED, "Authentication required"));
             }
         }
     }
@@ -153,11 +170,11 @@ async fn sse_handler(
     });
 
     tracing::debug!("Stream generated listened to: {:?}", &channels);
-    Sse::new(stream).keep_alive(
+    Ok(Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(30))
             .text("keep-alive"),
-    )
+    ))
 }
 
 #[derive(Deserialize)]
