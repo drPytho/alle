@@ -4,6 +4,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use axum_extra::{
+    headers::{authorization::Bearer, Authorization},
+    TypedHeader,
+};
 use futures::stream::Stream;
 use std::{convert::Infallible, sync::atomic::AtomicU64};
 use std::{sync::Arc, time::Duration};
@@ -13,11 +17,15 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 
-use crate::{drop_stream::DropStream, ChannelName, NotificationMessage, PostgresListener};
+use crate::{
+    auth::Authenticator, drop_stream::DropStream, ChannelName, NotificationMessage,
+    PostgresListener,
+};
 
 pub struct HttpPushServerState {
     pg_notify: Arc<PostgresListener>,
     client_id_counter: Arc<AtomicU64>,
+    auth: Option<Arc<Authenticator>>,
 }
 
 impl Clone for HttpPushServerState {
@@ -25,11 +33,16 @@ impl Clone for HttpPushServerState {
         HttpPushServerState {
             pg_notify: self.pg_notify.clone(),
             client_id_counter: self.client_id_counter.clone(),
+            auth: self.auth.clone(),
         }
     }
 }
 
-pub async fn server(bind_addr: String, pg_notify: Arc<PostgresListener>) -> Result<()> {
+pub async fn server(
+    bind_addr: String,
+    pg_notify: Arc<PostgresListener>,
+    auth: Option<Arc<Authenticator>>,
+) -> Result<()> {
     let listener = TcpListener::bind(bind_addr)
         .await
         .expect("We should be able to bind out server to addr");
@@ -37,6 +50,7 @@ pub async fn server(bind_addr: String, pg_notify: Arc<PostgresListener>) -> Resu
     let state = HttpPushServerState {
         pg_notify,
         client_id_counter: Arc::new(AtomicU64::new(0)),
+        auth,
     };
 
     let app = Router::new()
@@ -48,6 +62,7 @@ pub async fn server(bind_addr: String, pg_notify: Arc<PostgresListener>) -> Resu
 
     Ok(())
 }
+
 #[derive(Deserialize)]
 struct Channels {
     channels: String,
@@ -61,8 +76,26 @@ struct EventMessage {
 
 async fn sse_handler(
     channels: Query<Channels>,
+    auth_token: Option<TypedHeader<Authorization<Bearer>>>,
     State(state): State<HttpPushServerState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    if let Some(auth) = &state.auth {
+        if let Some(TypedHeader(auth_header)) = auth_token {
+            match auth.authenticate(auth_header.token()).await {
+                Ok(result) => {
+                    if !result.authenticated {
+                        tracing::warn!("Authentication failed for token");
+                    } else {
+                        tracing::debug!("Authentication successful for user: {}", result.user_id);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Authentication error: {}", e);
+                }
+            }
+        }
+    }
+
     let (sender, receiver) = tokio::sync::mpsc::channel(32);
 
     tracing::debug!("Request received for channels: {}", &channels.channels);

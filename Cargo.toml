@@ -12,17 +12,18 @@ name = "alle"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-tokio-postgres = "0.7"
-tokio-tungstenite = "0.24"
+anyhow = "1"
+axum = "0.8.6"
+axum-extra = { version = "0.10", features = ["typed-header"] }
+clap = { version = "4", features = ["derive", "env"] }
+futures = "0.3"
+futures-channel = "0.3.31"
+pin-project = "1.1.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-postgres = "0.7"
+tokio-stream = { version = "0.1.17", features = ["sync"] }
+tokio-tungstenite = "0.28"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-futures = "0.3"
-anyhow = "1"
-clap = { version = "4", features = ["derive", "env"] }
-tokio-stream = { version = "0.1.17", features = ["sync"] }
-axum = "0.8.6"
-pin-project = "1.1.10"
-futures-channel = "0.3.31"

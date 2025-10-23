@@ -227,7 +227,7 @@ impl WebSocketClient {
 
     async fn send(&mut self, response: ServerMessage) -> Result<()> {
         let json = serde_json::to_string(&response)?;
-        self.ws_stream.send(Message::Text(json)).await?;
+        self.ws_stream.send(Message::Text(json.into())).await?;
         Ok(())
     }
 }

@@ -12,6 +12,8 @@ pub use websocket::WebSocketServer;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::auth::AuthConfig;
+
 type ClientId = u64;
 
 /// A validated, lowercase PostgreSQL channel name
@@ -201,6 +203,8 @@ pub struct BridgeConfig {
 
     /// Channels to listen to on Postgres
     pub listen_channels: Vec<ChannelName>,
+
+    pub auth_config: Option<AuthConfig>,
 }
 
 impl BridgeConfig {
@@ -209,7 +213,13 @@ impl BridgeConfig {
             postgres_url,
             frontend,
             listen_channels: Vec::new(),
+            auth_config: None,
         }
+    }
+
+    pub fn with_auth(mut self, auth_config: AuthConfig) -> Self {
+        self.auth_config = Some(auth_config);
+        self
     }
 
     pub fn with_channels(mut self, channels: Vec<ChannelName>) -> Self {

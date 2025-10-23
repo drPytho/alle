@@ -82,7 +82,7 @@ impl Bridge {
                     },
                     async move {
                         info!("Server-Side Events server starting");
-                        server(se_addr, pg_listener_se).await
+                        server(se_addr, pg_listener_se, None).await
                     }
                 )?;
             }
@@ -93,7 +93,7 @@ impl Bridge {
             }
             (None, Some(se_addr)) => {
                 info!("Server-Side Events server path");
-                server(se_addr.clone(), Arc::clone(&pg_listener)).await?;
+                server(se_addr.clone(), Arc::clone(&pg_listener), None).await?;
             }
             (None, None) => {
                 return Err(anyhow::anyhow!(

@@ -1,4 +1,4 @@
-use alle::{Bridge, BridgeConfig, ChannelName, Frontend};
+use alle::{Bridge, BridgeConfig, Frontend};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -85,12 +85,6 @@ async fn main() -> Result<()> {
             se_bind_addr,
             channels,
         } => {
-            let channels: Vec<String> = channels
-                .into_iter()
-                .map(|c| c.trim().to_string())
-                .filter(|c| !c.is_empty())
-                .collect();
-
             // Build frontend configuration based on what's provided
             let mut frontend = Frontend::new();
             if let Some(addr) = ws_bind_addr {
@@ -108,7 +102,11 @@ async fn main() -> Result<()> {
 }
 
 /// Run the WebSocket bridge server
-async fn run_server(postgres_url: String, frontend: Frontend, channels: Vec<String>) -> Result<()> {
+async fn run_server(
+    postgres_url: String,
+    frontend: Frontend,
+    _channels: Vec<String>,
+) -> Result<()> {
     tracing::info!("Starting Alle WebSocket-Postgres bridge");
     tracing::info!("PostgreSQL: {}", postgres_url);
 
@@ -119,26 +117,7 @@ async fn run_server(postgres_url: String, frontend: Frontend, channels: Vec<Stri
         tracing::info!("Server-Side Events: {}", addr);
     }
 
-    // Convert String channels to ChannelName
-    let channel_names: Vec<ChannelName> = channels
-        .into_iter()
-        .filter_map(|ch| match ChannelName::new(ch) {
-            Ok(name) => Some(name),
-            Err(e) => {
-                tracing::error!("Invalid channel name: {}", e);
-                None
-            }
-        })
-        .collect();
-
-    if !channel_names.is_empty() {
-        let channel_strs: Vec<String> = channel_names.iter().map(|ch| ch.to_string()).collect();
-        tracing::info!("Initial channels: {}", channel_strs.join(", "));
-    } else {
-        tracing::info!("No initial channels - clients will subscribe dynamically");
-    }
-
-    let config = BridgeConfig::new(postgres_url, frontend).with_channels(channel_names);
+    let config = BridgeConfig::new(postgres_url, frontend);
     let bridge = Bridge::new(config);
     bridge.run().await?;
 

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use tokio_postgres::Client;
+use tokio_postgres::{Client, NoTls};
 
 /// Configuration for authentication
 #[derive(Debug, Clone)]
@@ -28,15 +28,26 @@ pub struct AuthResult {
 }
 
 /// Authenticator that verifies tokens against PostgreSQL
-pub struct Authenticator<'a> {
-    client: &'a Client,
+pub struct Authenticator {
+    client: Client,
     config: AuthConfig,
 }
 
-impl<'a> Authenticator<'a> {
-    /// Create a new authenticator with the given PostgreSQL client and config
-    pub fn new(client: &'a Client, config: AuthConfig) -> Self {
-        Self { client, config }
+impl Authenticator {
+    /// Create a new authenticator by connecting to PostgreSQL with the given connection string and config
+    pub async fn new(db_url: &str, config: AuthConfig) -> Result<Self> {
+        let (client, connection) = tokio_postgres::connect(db_url, NoTls)
+            .await
+            .context("Failed to connect to PostgreSQL")?;
+
+        // Spawn the connection to run in the background
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                tracing::error!("PostgreSQL connection error: {}", e);
+            }
+        });
+
+        Ok(Self { client, config })
     }
 
     /// Authenticate a user with the provided token
@@ -141,18 +152,8 @@ mod tests {
     #[ignore] // Requires PostgreSQL with auth function set up
     async fn test_authenticate_with_valid_token() {
         let db_url = std::env::var("TEST_DATABASE_URL").unwrap();
-        let (client, connection) = tokio_postgres::connect(&db_url, tokio_postgres::NoTls)
-            .await
-            .unwrap();
-
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
-            }
-        });
-
         let config = AuthConfig::new("authenticate_user");
-        let authenticator = Authenticator::new(&client, config);
+        let authenticator = Authenticator::new(&db_url, config).await.unwrap();
 
         let result = authenticator.authenticate("valid_token").await.unwrap();
         assert!(result.authenticated);
@@ -163,18 +164,8 @@ mod tests {
     #[ignore] // Requires PostgreSQL with auth function set up
     async fn test_verify_token() {
         let db_url = std::env::var("TEST_DATABASE_URL").unwrap();
-        let (client, connection) = tokio_postgres::connect(&db_url, tokio_postgres::NoTls)
-            .await
-            .unwrap();
-
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
-            }
-        });
-
         let config = AuthConfig::new("verify_token");
-        let authenticator = Authenticator::new(&client, config);
+        let authenticator = Authenticator::new(&db_url, config).await.unwrap();
 
         let is_valid = authenticator.verify_token("valid_token").await.unwrap();
         assert!(is_valid);
