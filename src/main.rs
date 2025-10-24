@@ -1,4 +1,4 @@
-use alle::{auth::AuthConfig, Bridge, BridgeConfig, Frontend};
+use alle::{Bridge, BridgeConfig, Frontend, auth::AuthConfig};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

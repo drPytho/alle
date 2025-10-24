@@ -1,6 +1,6 @@
 [package]
-name = "pit-alle"
-version = "0.0.1"
+name = "alle_pg"
+version = "0.0.2"
 edition = "2024"
 authors = ["Filip Lindvall"]
 readme = "README.md"
