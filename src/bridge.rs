@@ -1,16 +1,18 @@
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::{
-    auth::Authenticator, server_push::server, BridgeConfig, ChannelName, NotificationMessage,
-    PostgresListener, WebSocketServer,
+    BridgeConfig, ChannelName, NotificationMessage, PostgresListener, WebSocketServer,
+    auth::Authenticator, server_push::server,
 };
 
 /// Main bridge that connects Postgres NOTIFY with WebSocket clients
 pub struct Bridge {
     config: BridgeConfig,
+    cancellation_token: CancellationToken,
 }
 
 #[derive(Debug, Clone)]
@@ -40,7 +42,22 @@ pub enum PgNotifyEvent {
 impl Bridge {
     /// Create a new bridge with the given configuration
     pub fn new(config: BridgeConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            cancellation_token: CancellationToken::new(),
+        }
+    }
+
+    /// Get a handle to the cancellation token for graceful shutdown
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation_token.clone()
+    }
+
+    /// Initiate graceful shutdown of the bridge
+    /// This will stop accepting new connections and signal all servers to terminate
+    pub fn terminate(&self) {
+        info!("Bridge termination requested");
+        self.cancellation_token.cancel();
     }
 
     /// Start the bridge
@@ -87,17 +104,19 @@ impl Bridge {
                 let pg_listener_se = Arc::clone(&pg_listener);
                 let auth_ws = authenticator.clone();
                 let auth_se = authenticator.clone();
+                let cancel_token_ws = self.cancellation_token.clone();
+                let cancel_token_se = self.cancellation_token.clone();
 
                 // Run both servers concurrently
                 tokio::try_join!(
                     async move {
                         info!("WebSocket server starting");
                         let ws_server = WebSocketServer::new(ws_addr, pg_listener_ws, auth_ws);
-                        ws_server.start().await
+                        ws_server.start(cancel_token_ws).await
                     },
                     async move {
                         info!("Server-Side Events server starting");
-                        server(se_addr, pg_listener_se, auth_se).await
+                        server(se_addr, pg_listener_se, auth_se, cancel_token_se).await
                     }
                 )?;
             }
@@ -105,11 +124,17 @@ impl Bridge {
                 info!("WebSocket server path");
                 let ws_server =
                     WebSocketServer::new(ws_addr.clone(), Arc::clone(&pg_listener), authenticator);
-                ws_server.start().await?;
+                ws_server.start(self.cancellation_token.clone()).await?;
             }
             (None, Some(se_addr)) => {
                 info!("Server-Side Events server path");
-                server(se_addr.clone(), Arc::clone(&pg_listener), authenticator).await?;
+                server(
+                    se_addr.clone(),
+                    Arc::clone(&pg_listener),
+                    authenticator,
+                    self.cancellation_token.clone(),
+                )
+                .await?;
             }
             (None, None) => {
                 return Err(anyhow::anyhow!(

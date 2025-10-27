@@ -1,27 +1,28 @@
 use axum::{
+    Json, Router,
     extract::{Query, State},
     http::StatusCode,
-    response::sse::{Event, Sse},
     response::IntoResponse,
+    response::sse::{Event, Sse},
     routing::{get, post},
-    Json, Router,
 };
 use axum_extra::{
-    headers::{authorization::Bearer, Authorization},
     TypedHeader,
+    headers::{Authorization, authorization::Bearer},
 };
 use futures::stream::Stream;
 use std::{convert::Infallible, sync::atomic::AtomicU64};
 use std::{sync::Arc, time::Duration};
-use tokio_stream::{once, wrappers::ReceiverStream, StreamExt};
+use tokio_stream::{StreamExt, once, wrappers::ReceiverStream};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
-    auth::Authenticator, drop_stream::DropStream, ChannelName, NotificationMessage,
-    PostgresListener,
+    ChannelName, NotificationMessage, PostgresListener, auth::Authenticator,
+    drop_stream::DropStream,
 };
 
 pub struct HttpPushServerState {
@@ -44,10 +45,13 @@ pub async fn server(
     bind_addr: String,
     pg_notify: Arc<PostgresListener>,
     auth: Option<Arc<Authenticator>>,
+    cancellation_token: CancellationToken,
 ) -> Result<()> {
-    let listener = TcpListener::bind(bind_addr)
+    let listener = TcpListener::bind(&bind_addr)
         .await
         .expect("We should be able to bind out server to addr");
+
+    tracing::info!("Server-Side Events server listening on {}", bind_addr);
 
     let state = HttpPushServerState {
         pg_notify,
@@ -60,8 +64,16 @@ pub async fn server(
         .route("/notify", post(notify_handler))
         .with_state(state);
 
-    axum::serve(listener, app).await.unwrap();
+    // Use graceful shutdown with the cancellation token
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            cancellation_token.cancelled().await;
+            tracing::info!("Server-Side Events server received shutdown signal");
+        })
+        .await
+        .unwrap();
 
+    tracing::info!("Server-Side Events server shutdown complete");
     Ok(())
 }
 

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc::Sender, RwLock};
+use tokio::sync::{RwLock, mpsc::Sender};
 
 use anyhow::{Context, Result};
 use futures::StreamExt;

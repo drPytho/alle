@@ -7,12 +7,13 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
+use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    auth::Authenticator, ChannelName, ClientId, ClientMessage, NotificationMessage,
-    PostgresListener, ServerMessage,
+    ChannelName, ClientId, ClientMessage, NotificationMessage, PostgresListener, ServerMessage,
+    auth::Authenticator,
 };
 
 /// WebSocket server that handles client connections
@@ -39,7 +40,7 @@ impl WebSocketServer {
     }
 
     /// Start the WebSocket server
-    pub async fn start(mut self) -> Result<()> {
+    pub async fn start(mut self, cancellation_token: CancellationToken) -> Result<()> {
         let listener = TcpListener::bind(&self.bind_addr)
             .await
             .context(format!("Failed to bind to {}", self.bind_addr))?;
@@ -47,31 +48,43 @@ impl WebSocketServer {
         info!("WebSocket server listening on {}", self.bind_addr);
 
         loop {
-            // Accept new WebSocket connections
-            let (stream, addr) = listener.accept().await?;
-            info!("New WebSocket connection from {}", addr);
+            tokio::select! {
+                // Accept new WebSocket connections
+                result = listener.accept() => {
+                    let (stream, addr) = result?;
+                    info!("New WebSocket connection from {}", addr);
 
-            let client_id = self.next_client_id;
-            self.next_client_id += 1;
-            let pg_listener = Arc::clone(&self.pg_listener);
-            let authenticator = self.authenticator.clone();
+                    let client_id = self.next_client_id;
+                    self.next_client_id += 1;
+                    let pg_listener = Arc::clone(&self.pg_listener);
+                    let authenticator = self.authenticator.clone();
 
-            tokio::spawn(async move {
-                let mut client =
-                    match WebSocketClient::new(client_id, stream, pg_listener, authenticator).await
-                    {
-                        Ok(client) => client,
-                        Err(err) => {
-                            error!("Error instanciating the connection to {}: {}", addr, err);
-                            return;
+                    tokio::spawn(async move {
+                        let mut client =
+                            match WebSocketClient::new(client_id, stream, pg_listener, authenticator).await
+                            {
+                                Ok(client) => client,
+                                Err(err) => {
+                                    error!("Error instanciating the connection to {}: {}", addr, err);
+                                    return;
+                                }
+                            };
+
+                        if let Err(e) = client.handle_connection().await {
+                            error!("Error handling connection from {}: {}", addr, e);
                         }
-                    };
-
-                if let Err(e) = client.handle_connection().await {
-                    error!("Error handling connection from {}: {}", addr, e);
+                    });
                 }
-            });
+                // Listen for shutdown signal
+                _ = cancellation_token.cancelled() => {
+                    info!("WebSocket server received shutdown signal, stopping accept loop");
+                    break;
+                }
+            }
         }
+
+        info!("WebSocket server shutdown complete");
+        Ok(())
     }
 }
 
@@ -115,8 +128,8 @@ impl WebSocketClient {
 
         // Clean up client subscriptions on disconnect
         let channels_to_cleanup: Vec<ChannelName> = self.channels.iter().cloned().collect();
-        if !channels_to_cleanup.is_empty() {
-            if let Err(e) = self
+        if !channels_to_cleanup.is_empty()
+            && let Err(e) = self
                 .pg_listener
                 .unlisten_many(self.client_id, &channels_to_cleanup)
                 .await
@@ -126,7 +139,6 @@ impl WebSocketClient {
                     self.client_id, e
                 );
             }
-        }
         info!("Client {} disconnected", self.client_id);
 
         result
