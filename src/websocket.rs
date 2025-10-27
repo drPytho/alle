@@ -133,12 +133,12 @@ impl WebSocketClient {
                 .pg_listener
                 .unlisten_many(self.client_id, &channels_to_cleanup)
                 .await
-            {
-                warn!(
-                    "Failed to cleanup subscriptions for client {}: {}",
-                    self.client_id, e
-                );
-            }
+        {
+            warn!(
+                "Failed to cleanup subscriptions for client {}: {}",
+                self.client_id, e
+            );
+        }
         info!("Client {} disconnected", self.client_id);
 
         result

@@ -10,6 +10,7 @@ use crate::{
 };
 
 /// Main bridge that connects Postgres NOTIFY with WebSocket clients
+#[derive(Clone)]
 pub struct Bridge {
     config: BridgeConfig,
     cancellation_token: CancellationToken,
