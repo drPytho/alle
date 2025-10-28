@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod bridge;
 mod drop_stream;
+pub(crate) mod metrics;
 pub mod postgres;
 pub mod server_push;
 pub mod websocket;

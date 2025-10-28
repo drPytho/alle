@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use futures::StreamExt;
 use tokio_postgres::{AsyncMessage, Client, NoTls};
 
-use crate::{ChannelName, NotificationMessage};
+use crate::{ChannelName, NotificationMessage, metrics};
 
 type ChannelsMap = HashMap<ChannelName, HashMap<u64, Sender<NotificationMessage>>>;
 
@@ -21,7 +21,8 @@ impl PostgresListener {
     pub async fn connect(postgres_url: &str) -> Result<Self> {
         let (client, mut connection) = tokio_postgres::connect(postgres_url, NoTls)
             .await
-            .context("Failed to connect to PostgreSQL")?;
+            .context("Failed to connect to PostgreSQL")
+            .inspect_err(|_| metrics::errors::postgres_connection())?;
 
         tracing::info!("Connected to PostgreSQL");
 
@@ -91,6 +92,7 @@ impl PostgresListener {
         let channel = match ChannelName::new(notif.channel()) {
             Ok(ch) => ch,
             Err(e) => {
+                metrics::errors::invalid_channel_name();
                 tracing::error!("Invalid channel name from Postgres: {}", e);
                 return;
             }
@@ -100,6 +102,9 @@ impl PostgresListener {
             channel: channel.clone(),
             payload: notif.payload().to_string(),
         };
+
+        metrics::messages::received_from_postgres(channel.as_str());
+        metrics::messages::payload_size(msg.payload.len(), "from_postgres");
 
         tracing::debug!(
             "Received notification on channel '{}': {}",
@@ -119,6 +124,7 @@ impl PostgresListener {
             for (id, chan) in subscribers.iter() {
                 if let Err(e) = chan.send(msg.clone()).await {
                     tracing::warn!("Receiver {} disconnected: {}", id, e);
+                    metrics::messages::send_failed("client_disconnected");
                     dead_ids.push(*id);
                 }
             }
@@ -164,6 +170,7 @@ impl PostgresListener {
         // Execute LISTEN commands outside the lock to avoid deadlock
         for channel in channels_needing_listen {
             self.execute_listen(&channel).await?;
+            metrics::channels::postgres_listen(channel.as_str());
         }
 
         Ok(())
@@ -198,6 +205,7 @@ impl PostgresListener {
             let empty = channels.get(&channel).is_none_or(|v| v.is_empty());
             if empty {
                 self.execute_unlisten(&channel).await?;
+                metrics::channels::postgres_unlisten(channel.as_str());
             }
         }
 

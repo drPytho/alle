@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     ChannelName, NotificationMessage, PostgresListener, auth::Authenticator,
-    drop_stream::DropStream,
+    drop_stream::DropStream, metrics,
 };
 
 pub struct HttpPushServerState {
@@ -51,7 +51,7 @@ pub async fn server(
         .await
         .expect("We should be able to bind out server to addr");
 
-    tracing::info!("Server-Side Events server listening on {}", bind_addr);
+    tracing::info!("Server-Sent Events server listening on {}", bind_addr);
 
     let state = HttpPushServerState {
         pg_notify,
@@ -68,12 +68,12 @@ pub async fn server(
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             cancellation_token.cancelled().await;
-            tracing::info!("Server-Side Events server received shutdown signal");
+            tracing::info!("Server-Sent Events server received shutdown signal");
         })
         .await
         .unwrap();
 
-    tracing::info!("Server-Side Events server shutdown complete");
+    tracing::info!("Server-Sent Events server shutdown complete");
     Ok(())
 }
 
@@ -99,9 +99,11 @@ async fn sse_handler(
             Some(TypedHeader(auth_header)) => match auth.authenticate(auth_header.token()).await {
                 Ok(result) => {
                     if !result.authenticated {
+                        metrics::auth::failure();
                         tracing::warn!("SSE authentication failed");
                         return Err((StatusCode::UNAUTHORIZED, "Authentication failed"));
                     } else {
+                        metrics::auth::success();
                         tracing::debug!(
                             "SSE authentication successful for user: {}",
                             result.user_id
@@ -109,11 +111,13 @@ async fn sse_handler(
                     }
                 }
                 Err(e) => {
+                    metrics::auth::error();
                     tracing::error!("SSE authentication error: {}", e);
                     return Err((StatusCode::INTERNAL_SERVER_ERROR, "Authentication error"));
                 }
             },
             None => {
+                metrics::auth::rejected();
                 tracing::warn!("SSE request missing authentication token");
                 return Err((StatusCode::UNAUTHORIZED, "Authentication required"));
             }
@@ -127,6 +131,8 @@ async fn sse_handler(
         .client_id_counter
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+    metrics::connections::sse_connected();
+
     // Parse and validate channel names
     let channels: Vec<ChannelName> = channels
         .channels
@@ -134,6 +140,7 @@ async fn sse_handler(
         .filter_map(|ch| match ChannelName::new(ch) {
             Ok(channel_name) => Some(channel_name),
             Err(e) => {
+                metrics::errors::invalid_channel_name();
                 tracing::error!("Invalid channel name '{}': {}", ch, e);
                 None
             }
@@ -149,12 +156,20 @@ async fn sse_handler(
         .await
         .expect("Should be able to send message");
 
+    // Record subscription metrics for each channel
+    for channel in &channels {
+        metrics::channels::subscribed(channel.as_str());
+    }
+
     tracing::debug!("Channels listened to: {:?}", &channels);
 
     let drop_channels = channels.clone();
 
     let stream = ReceiverStream::new(receiver).filter_map(
         move |NotificationMessage { channel, payload }| {
+            metrics::messages::sent_to_sse_client(channel.as_str());
+            metrics::messages::payload_size(payload.len(), "to_client");
+
             let message = EventMessage { channel, payload };
             let json_data =
                 serde_json::to_string(&message).expect("Failed to serialize event message");
@@ -169,11 +184,18 @@ async fn sse_handler(
     let stream = ping.chain(stream);
 
     let stream = DropStream::new(stream, move || async move {
+        // Record unsubscription metrics for each channel
+        for channel in &drop_channels {
+            metrics::channels::unsubscribed(channel.as_str());
+        }
+
         state
             .pg_notify
             .unlisten_many(client_id, &drop_channels)
             .await
             .expect("Should be able to send message");
+
+        metrics::connections::sse_disconnected();
     });
 
     tracing::debug!("Stream generated listened to: {:?}", &channels);
@@ -204,6 +226,7 @@ async fn notify_handler(
     let channel = match ChannelName::new(request.channel) {
         Ok(val) => val,
         Err(e) => {
+            metrics::errors::invalid_channel_name();
             let error_msg = format!("Bad channel name: {}", e);
             tracing::error!("{}", error_msg);
             return Json(NotifyResponse {
@@ -212,6 +235,10 @@ async fn notify_handler(
             });
         }
     };
+
+    metrics::messages::sent_to_postgres(channel.as_str());
+    metrics::messages::payload_size(request.payload.len(), "to_postgres");
+
     let res = state.pg_notify.notify(&channel, &request.payload).await;
     match res {
         Ok(_) => Json(NotifyResponse {

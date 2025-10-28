@@ -1,6 +1,6 @@
 # Alle
 
-A Rust library and deployable binary that bridges WebSockets or Server Side events with and PostgreSQL NOTIFY/LISTEN with dynamic subscription management.
+A Rust library and deployable binary that bridges WebSockets or Server Sent events with and PostgreSQL NOTIFY/LISTEN with dynamic subscription management.
 
 This allows you to have an unlimited amount of remote listeners in the postgreSQL NOTIFY/LISTEN interface.
 

@@ -10,6 +10,10 @@ description = "A message bridge between Postgres Listen notifty and SSE/WS"
 
 exclude = ["sse_listener.py", "Dockerfile", "docker-compose.yml", "init.sql"]
 
+[features]
+default = ["metrics-export"]
+metrics-export = ["dep:metrics-util"]
+
 [lib]
 name = "alle"
 path = "src/lib.rs"
@@ -25,6 +29,8 @@ axum-extra = { version = "0.10", features = ["typed-header"] }
 clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3"
 futures-channel = "0.3.31"
+metrics = "0.24.2"
+metrics-util = { version = "0.18", optional = true }
 pin-project = "1.1.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

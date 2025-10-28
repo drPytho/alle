@@ -121,7 +121,7 @@ async fn run_server(
         tracing::info!("WebSocket: {}", addr);
     }
     if let Some(ref addr) = frontend.server_push {
-        tracing::info!("Server-Side Events: {}", addr);
+        tracing::info!("Server-Sent Events: {}", addr);
     }
 
     if let Some(ref func) = auth_function {

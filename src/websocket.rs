@@ -13,7 +13,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     ChannelName, ClientId, ClientMessage, NotificationMessage, PostgresListener, ServerMessage,
-    auth::Authenticator,
+    auth::Authenticator, metrics,
 };
 
 /// WebSocket server that handles client connections
@@ -123,6 +123,7 @@ impl WebSocketClient {
     async fn handle_connection(&mut self) -> Result<()> {
         // Register this client with the subscription manager
         info!("Client {} connected", self.client_id);
+        metrics::connections::ws_connected();
 
         let result = self.handle_client_loop().await;
 
@@ -140,6 +141,7 @@ impl WebSocketClient {
             );
         }
         info!("Client {} disconnected", self.client_id);
+        metrics::connections::ws_disconnected();
 
         result
     }
@@ -160,11 +162,15 @@ impl WebSocketClient {
                                 continue;
                             }
 
+                            metrics::messages::sent_to_ws_client(notif.channel.as_str());
+                            metrics::messages::payload_size(notif.payload.len(), "to_client");
+
                             if let Err(e) = self.send(ServerMessage::Notification {
                                 channel: notif.channel.clone(),
                                 payload: notif.payload.clone(),
                             }).await {
                                 warn!("Failed to send message to client {}: {}", self.client_id, e);
+                                metrics::messages::send_failed("ws_send_error");
                                 break;
                             }
                         }
@@ -181,6 +187,7 @@ impl WebSocketClient {
                         Some(Ok(Message::Text(text))) => {
                             if let Err(e) = self.handle_client_message(&text, &sender).await {
                                 error!("Error handling client {} message: {}", self.client_id, e);
+                                metrics::errors::json_parse();
                                 self.send(ServerMessage::Error {
                                     message: format!("Error: {}", e),
                                 }).await?;
@@ -230,6 +237,7 @@ impl WebSocketClient {
                         Ok(result) => {
                             if result.authenticated {
                                 self.authenticated = true;
+                                metrics::auth::success();
                                 info!(
                                     "Client {} authenticated as user: {}",
                                     self.client_id, result.user_id
@@ -239,6 +247,7 @@ impl WebSocketClient {
                                 })
                                 .await?;
                             } else {
+                                metrics::auth::failure();
                                 warn!("Client {} authentication failed", self.client_id);
                                 self.send(ServerMessage::Error {
                                     message: "Authentication failed".to_string(),
@@ -247,6 +256,7 @@ impl WebSocketClient {
                             }
                         }
                         Err(e) => {
+                            metrics::auth::error();
                             error!("Client {} authentication error: {}", self.client_id, e);
                             self.send(ServerMessage::Error {
                                 message: format!("Authentication error: {}", e),
@@ -270,6 +280,7 @@ impl WebSocketClient {
             ClientMessage::Subscribe { channel } => {
                 // Check if authentication is required and client is not authenticated
                 if !self.authenticated {
+                    metrics::auth::rejected();
                     warn!(
                         "Client {} attempted to subscribe without authentication",
                         self.client_id
@@ -287,12 +298,14 @@ impl WebSocketClient {
                     .await
                     .context("Failed to subscribe to channel")?;
 
+                metrics::channels::subscribed(channel.as_str());
                 self.send(ServerMessage::Subscribed { channel }).await?;
             }
 
             ClientMessage::Unsubscribe { channel } => {
                 // Check if authentication is required and client is not authenticated
                 if !self.authenticated {
+                    metrics::auth::rejected();
                     warn!(
                         "Client {} attempted to unsubscribe without authentication",
                         self.client_id
@@ -310,12 +323,14 @@ impl WebSocketClient {
                     .await
                     .context("Failed to unsubscribe from channel")?;
 
+                metrics::channels::unsubscribed(channel.as_str());
                 self.send(ServerMessage::Unsubscribed { channel }).await?;
             }
 
             ClientMessage::Notify { channel, payload } => {
                 // Check if authentication is required and client is not authenticated
                 if !self.authenticated {
+                    metrics::auth::rejected();
                     warn!(
                         "Client {} attempted to notify without authentication",
                         self.client_id
@@ -326,6 +341,9 @@ impl WebSocketClient {
                         })
                         .await;
                 }
+
+                metrics::messages::sent_to_postgres(channel.as_str());
+                metrics::messages::payload_size(payload.len(), "to_postgres");
 
                 self.pg_listener
                     .notify(&channel, &payload)

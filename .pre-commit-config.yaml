@@ -22,14 +22,14 @@ repos:
 
       - id: cargo-check
         name: cargo check (via just)
-        entry: just check-all
+        entry: just check
         language: system
         types: [rust]
         pass_filenames: false
 
       - id: cargo-clippy
         name: cargo clippy (via just)
-        entry: just clippy-all
+        entry: just clippy
         language: system
         types: [rust]
         pass_filenames: false

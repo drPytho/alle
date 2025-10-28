@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use tokio_postgres::{Client, NoTls};
 
+use crate::metrics;
+
 /// Configuration for authentication
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
@@ -38,7 +40,8 @@ impl Authenticator {
     pub async fn new(db_url: &str, config: AuthConfig) -> Result<Self> {
         let (client, connection) = tokio_postgres::connect(db_url, NoTls)
             .await
-            .context("Failed to connect to PostgreSQL")?;
+            .context("Failed to connect to PostgreSQL")
+            .inspect_err(|_| metrics::errors::postgres_connection())?;
 
         // Spawn the connection to run in the background
         tokio::spawn(async move {

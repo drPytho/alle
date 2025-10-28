@@ -6,7 +6,7 @@ use tracing::info;
 
 use crate::{
     BridgeConfig, ChannelName, NotificationMessage, PostgresListener, WebSocketServer,
-    auth::Authenticator, server_push::server,
+    auth::Authenticator, metrics, server_push::server,
 };
 
 /// Main bridge that connects Postgres NOTIFY with WebSocket clients
@@ -43,6 +43,9 @@ pub enum PgNotifyEvent {
 impl Bridge {
     /// Create a new bridge with the given configuration
     pub fn new(config: BridgeConfig) -> Self {
+        // Initialize metrics recorder (safe to call multiple times)
+        metrics::install_recorder();
+
         Self {
             config,
             cancellation_token: CancellationToken::new(),
@@ -61,11 +64,25 @@ impl Bridge {
         self.cancellation_token.cancel();
     }
 
+    /// Get a snapshot of all current metric values
+    /// Returns a HashMap with metric names as keys and their current values as f64
+    ///
+    /// Example metric names:
+    /// - `alle_websocket_connections_active` - Current active WebSocket connections
+    /// - `alle_messages_sent_to_ws_clients_total{channel=my_channel}` - Messages sent on a specific channel
+    /// - `alle_auth_attempts_total{result=success}` - Successful auth attempts
+    ///
+    /// Note: This method is only available when the `metrics-export` feature is enabled (default)
+    #[cfg(feature = "metrics-export")]
+    pub fn get_metrics(&self) -> std::collections::HashMap<String, f64> {
+        metrics::get_snapshot()
+    }
+
     /// Start the bridge
     /// This will:
     /// 1. Connect to PostgreSQL
     /// 2. Create subscription manager for dynamic channel management
-    /// 3. Start the WebSocket server and/or Server-Side Events server
+    /// 3. Start the WebSocket server and/or Server-Sent Events server
     /// 4. Dynamically LISTEN/UNLISTEN on Postgres based on client subscriptions
     /// 5. Forward messages bidirectionally between Postgres and WebSocket clients
     pub async fn run(self) -> Result<()> {
@@ -98,7 +115,7 @@ impl Bridge {
             &self.config.frontend.server_push,
         ) {
             (Some(ws_addr), Some(se_addr)) => {
-                info!("Starting both WebSocket and Server-Side Events servers");
+                info!("Starting both WebSocket and Server-Sent Events servers");
                 let ws_addr = ws_addr.clone();
                 let se_addr = se_addr.clone();
                 let pg_listener_ws = Arc::clone(&pg_listener);
@@ -116,7 +133,7 @@ impl Bridge {
                         ws_server.start(cancel_token_ws).await
                     },
                     async move {
-                        info!("Server-Side Events server starting");
+                        info!("Server-Sent Events server starting");
                         server(se_addr, pg_listener_se, auth_se, cancel_token_se).await
                     }
                 )?;
@@ -128,7 +145,7 @@ impl Bridge {
                 ws_server.start(self.cancellation_token.clone()).await?;
             }
             (None, Some(se_addr)) => {
-                info!("Server-Side Events server path");
+                info!("Server-Sent Events server path");
                 server(
                     se_addr.clone(),
                     Arc::clone(&pg_listener),
@@ -139,7 +156,7 @@ impl Bridge {
             }
             (None, None) => {
                 return Err(anyhow::anyhow!(
-                    "At least one frontend (WebSocket or Server-Side Events) must be configured"
+                    "At least one frontend (WebSocket or Server-Sent Events) must be configured"
                 ));
             }
         }
