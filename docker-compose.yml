@@ -24,6 +24,8 @@ services:
   alle:
     build: .
     container_name: alle
+    env_file:
+      - .env
     environment:
       POSTGRES_URL: "postgresql://postgres:postgres@postgres:5432/postgres"
       SE_BIND_ADDR: "0.0.0.0:8080"

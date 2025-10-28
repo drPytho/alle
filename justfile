@@ -27,9 +27,8 @@ test:
 test_one *ARGS:
     cargo test -- {{ARGS}}
 
-# Run tests with output
-test-verbose:
-    cargo test -- --nocapture
+test_integration:
+    cargo test --test sse_auth_tests -- --ignored
 
 check:
     cargo check --all-targets

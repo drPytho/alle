@@ -55,10 +55,31 @@ INSERT INTO orders (customer_name, total, status) VALUES
     ('Bob Smith', 149.50, 'completed'),
     ('Charlie Brown', 75.25, 'pending');
 
+-- Simple auth function for testing
+CREATE OR REPLACE FUNCTION authenticate_user(token TEXT)
+RETURNS TABLE(user_id TEXT, authenticated BOOLEAN) AS $$
+BEGIN
+    IF token = 'valid_token' THEN
+        RETURN QUERY SELECT 'user_123'::TEXT, TRUE;
+    ELSE
+        RETURN QUERY SELECT ''::TEXT, FALSE;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Even simpler boolean-only auth function
+CREATE OR REPLACE FUNCTION verify_token(token TEXT)
+RETURNS BOOLEAN AS $$
+BEGIN
+    RETURN token = 'valid_token';
+END;
+$$ LANGUAGE plpgsql;
+
 -- Print success message
 DO $$
 BEGIN
     RAISE NOTICE 'Alle test database initialized successfully!';
     RAISE NOTICE 'Sample orders table created with % rows', (SELECT COUNT(*) FROM orders);
     RAISE NOTICE 'Notification trigger installed on orders table';
+    RAISE NOTICE 'Auth functions created: authenticate_user, verify_token';
 END $$;

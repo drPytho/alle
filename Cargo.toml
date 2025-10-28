@@ -41,3 +41,8 @@ tokio-tungstenite = "0.28"
 tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["stream"] }
+eventsource-stream = "0.2"
+tokio-test = "0.4"
