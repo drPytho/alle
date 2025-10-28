@@ -158,7 +158,7 @@ async fn main() -> Result<()> {
 }
 ```
 
-## Helper client 
+## Helper client
 
 
 
