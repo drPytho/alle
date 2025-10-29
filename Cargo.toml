@@ -15,7 +15,7 @@ default = ["metrics-export"]
 metrics-export = ["dep:metrics-util"]
 
 [lib]
-name = "alle"
+name = "alle_pg"
 path = "src/lib.rs"
 
 [[bin]]
