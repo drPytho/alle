@@ -101,7 +101,10 @@ async fn sse_handler(
                     if !result.authenticated {
                         metrics::auth::failure();
                         tracing::warn!("SSE authentication failed");
-                        return Err((StatusCode::UNAUTHORIZED, "Authentication failed"));
+                        return Err((
+                            StatusCode::UNAUTHORIZED,
+                            "Authentication failed".to_string(),
+                        ));
                     } else {
                         metrics::auth::success();
                         tracing::debug!(
@@ -113,13 +116,19 @@ async fn sse_handler(
                 Err(e) => {
                     metrics::auth::error();
                     tracing::error!("SSE authentication error: {}", e);
-                    return Err((StatusCode::INTERNAL_SERVER_ERROR, "Authentication error"));
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Authentication error".to_string(),
+                    ));
                 }
             },
             None => {
                 metrics::auth::rejected();
                 tracing::warn!("SSE request missing authentication token");
-                return Err((StatusCode::UNAUTHORIZED, "Authentication required"));
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "Authentication required".to_string(),
+                ));
             }
         }
     }
@@ -134,17 +143,34 @@ async fn sse_handler(
     metrics::connections::sse_connected();
 
     // Parse and validate channel names
-    let channels: Vec<ChannelName> = channels
+    let channel_results: Vec<_> = channels
         .channels
         .split(",")
-        .filter_map(|ch| match ChannelName::new(ch) {
-            Ok(channel_name) => Some(channel_name),
-            Err(e) => {
-                metrics::errors::invalid_channel_name();
-                tracing::error!("Invalid channel name '{}': {}", ch, e);
+        .map(|ch| (ch, ChannelName::new(ch)))
+        .collect();
+
+    // Check for any invalid channel names
+    let invalid_channels: Vec<_> = channel_results
+        .iter()
+        .filter_map(|(ch, result)| {
+            if let Err(e) = result {
+                Some(format!("'{}': {}", ch, e))
+            } else {
                 None
             }
         })
+        .collect();
+
+    if !invalid_channels.is_empty() {
+        metrics::errors::invalid_channel_name();
+        let error_msg = format!("Invalid channel names: {}", invalid_channels.join(", "));
+        tracing::warn!("{}", error_msg);
+        return Err((StatusCode::BAD_REQUEST, error_msg));
+    }
+
+    let channels: Vec<ChannelName> = channel_results
+        .into_iter()
+        .map(|(_, result)| result.unwrap())
         .collect();
 
     tracing::debug!("Channels extracted: {:?}", &channels);

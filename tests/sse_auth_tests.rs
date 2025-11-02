@@ -1,4 +1,4 @@
-use alle::{
+use alle_pg::{
     Bridge, BridgeConfig, ChannelName, Frontend, PostgresListener,
     auth::{AuthConfig, Authenticator},
 };
