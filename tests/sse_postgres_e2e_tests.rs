@@ -662,3 +662,50 @@ async fn test_payload_with_quotes_and_escapes() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+#[ignore] // Requires PostgreSQL
+async fn test_non_ascii_channel_name() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let (server_url, bridge) = start_test_server(19012).await?;
+    let pg_client = create_postgres_client().await?;
+
+    let channel = ChannelName::new("åäö")?;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{}/sse?channels=åäö", server_url))
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), 200);
+    let mut stream = response.bytes_stream().eventsource();
+
+    // Send payload with quotes, backslashes, and special characters
+    let special_payload = r#"TEST"#;
+    send_notification(&pg_client, &channel, special_payload).await?;
+
+    let result = timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(event) => {
+                    if event.data.contains("TEST") {
+                        return Ok::<_, anyhow::Error>(());
+                    }
+                }
+                Err(e) => return Err(anyhow::anyhow!("Stream error: {}", e)),
+            }
+        }
+        Err(anyhow::anyhow!("Did not receive escaped message"))
+    })
+    .await;
+
+    bridge.terminate();
+    assert!(
+        result.is_ok(),
+        "Should handle escaped characters in payloads"
+    );
+
+    Ok(())
+}
