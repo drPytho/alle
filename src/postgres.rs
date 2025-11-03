@@ -215,31 +215,42 @@ impl PostgresListener {
     /// Subscribe to a channel (LISTEN)
     async fn execute_listen(&self, channel: &ChannelName) -> Result<()> {
         self.client
-            .execute(&format!("LISTEN {}", channel), &[])
+            .execute(&format!(r#"LISTEN "{}""#, channel.quote_identifier()), &[])
             .await
-            .context(format!("Failed to LISTEN on channel '{}'", channel))?;
+            .context(format!(
+                "Failed to LISTEN on channel '{}'",
+                channel.quote_identifier()
+            ))?;
 
-        tracing::debug!("Listening on channel '{}'", channel);
+        tracing::debug!("Listening on channel '{}'", channel.quote_identifier());
         Ok(())
     }
     /// Unsubscribe from a channel (UNLISTEN)
     async fn execute_unlisten(&self, channel: &ChannelName) -> Result<()> {
         self.client
-            .execute(&format!("UNLISTEN {}", channel), &[])
+            .execute(&format!("UNLISTEN {}", channel.quote_identifier()), &[])
             .await
-            .context(format!("Failed to UNLISTEN on channel '{}'", channel))?;
+            .context(format!(
+                "Failed to UNLISTEN on channel '{}'",
+                channel.quote_identifier()
+            ))?;
 
-        tracing::debug!("Stopped listening on channel '{}'", channel);
+        tracing::debug!(
+            "Stopped listening on channel '{}'",
+            channel.quote_identifier()
+        );
         Ok(())
     }
 
     /// Send a notification to a channel (NOTIFY)
     pub async fn notify(&self, channel: &ChannelName, payload: &str) -> Result<()> {
         tracing::debug!("Sendign on channel: {}, Payload: {}", channel, payload);
-        let channel_str = channel.as_str();
         if let Err(e) = self
             .client
-            .execute("SELECT pg_notify($1, $2)", &[&channel_str, &payload])
+            .execute(
+                r#"SELECT pg_notify($1, $2)"#,
+                &[&channel.quote_identifier(), &payload],
+            )
             .await
         {
             tracing::error!("could not notify postgres {:?}", e.to_string());

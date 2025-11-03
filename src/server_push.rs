@@ -45,6 +45,7 @@ pub async fn server(
     bind_addr: String,
     pg_notify: Arc<PostgresListener>,
     auth: Option<Arc<Authenticator>>,
+    sse_path: Option<String>,
     cancellation_token: CancellationToken,
 ) -> Result<()> {
     let listener = TcpListener::bind(&bind_addr)
@@ -59,8 +60,10 @@ pub async fn server(
         auth,
     };
 
+    let sse_route = sse_path.unwrap_or_else(|| "/sse".to_string());
+
     let app = Router::new()
-        .route("/events", get(sse_handler))
+        .route(&sse_route, get(sse_handler))
         .route("/notify", post(notify_handler))
         .with_state(state);
 

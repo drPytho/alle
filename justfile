@@ -27,8 +27,13 @@ test:
 test_one *ARGS:
     cargo test -- {{ARGS}}
 
-test_integration:
+test_integration: test_auth test_e2e
+
+test_auth:
     cargo test --test sse_auth_tests -- --ignored
+
+test_e2e:
+    cargo test --test sse_postgres_e2e_tests -- --ignored
 
 check:
     cargo check --all-targets

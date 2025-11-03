@@ -8,7 +8,11 @@ use futures::StreamExt;
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::OnceCell;
 use tokio::time::sleep;
+
+/// Global cell to ensure auth functions are set up only once
+static AUTH_SETUP: OnceCell<()> = OnceCell::const_new();
 
 /// Test database URL - must have the auth functions from init.sql
 fn test_db_url() -> String {
@@ -26,7 +30,7 @@ async fn start_test_server(with_auth: bool, port: u16) -> Result<(String, Bridge
 
     let mut config = BridgeConfig::new(db_url, frontend);
     if with_auth {
-        config = config.with_auth(AuthConfig::new("authenticate_user"));
+        config = config.with_auth(AuthConfig::new("test_not_prod_authenticate_user"));
     }
 
     let bridge = Bridge::new(config);
@@ -54,17 +58,75 @@ async fn create_test_listener() -> Result<Arc<PostgresListener>> {
     Ok(Arc::new(listener))
 }
 
+/// Helper to ensure auth functions exist in the database (runs only once)
+async fn ensure_auth_functions() -> Result<()> {
+    AUTH_SETUP
+        .get_or_try_init(|| async {
+            let db_url = test_db_url();
+            let (client, connection) = tokio_postgres::connect(&db_url, tokio_postgres::NoTls)
+                .await
+                .with_context(|| format!("Failed to connect to database: {}", db_url))?;
+
+            // Spawn connection in background
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("Database connection error: {}", e);
+                }
+            });
+
+            // Create both auth functions in a single transaction
+            client
+                .execute(
+                    r#"
+                    DO $$
+                    BEGIN
+                        -- Drop and recreate test_not_prod_authenticate_user function
+                        DROP FUNCTION IF EXISTS test_not_prod_authenticate_user(TEXT);
+                        CREATE FUNCTION test_not_prod_authenticate_user(token TEXT)
+                        RETURNS TABLE(user_id TEXT, authenticated BOOLEAN) AS $func$
+                        BEGIN
+                            IF token = 'valid_token' THEN
+                                RETURN QUERY SELECT 'user_123'::TEXT, TRUE;
+                            ELSE
+                                RETURN QUERY SELECT ''::TEXT, FALSE;
+                            END IF;
+                        END;
+                        $func$ LANGUAGE plpgsql;
+
+                        -- Drop and recreate test_not_prod_verify_token function
+                        DROP FUNCTION IF EXISTS test_not_prod_verify_token(TEXT);
+                        CREATE FUNCTION test_not_prod_verify_token(token TEXT)
+                        RETURNS BOOLEAN AS $func$
+                        BEGIN
+                            RETURN token = 'valid_token';
+                        END;
+                        $func$ LANGUAGE plpgsql;
+                    END $$;
+                    "#,
+                    &[],
+                )
+                .await
+                .context("Failed to create auth functions")?;
+
+            Ok::<(), anyhow::Error>(())
+        })
+        .await?;
+
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore] // Requires PostgreSQL with auth functions
 async fn test_sse_with_valid_token() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
+    ensure_auth_functions().await?;
 
     let (server_url, bridge) = start_test_server(true, 18081).await?;
 
     // Create HTTP client with valid token
     let client = reqwest::Client::new();
     let response = client
-        .get(format!("{}/events?channels=test_channel", server_url))
+        .get(format!("{}/sse?channels=test_channel", server_url))
         .header(
             AUTHORIZATION,
             HeaderValue::from_static("Bearer valid_token"),
@@ -112,13 +174,14 @@ async fn test_sse_with_valid_token() -> Result<()> {
 #[ignore] // Requires PostgreSQL with auth functions
 async fn test_sse_with_invalid_token() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
+    ensure_auth_functions().await?;
 
     let (server_url, bridge) = start_test_server(true, 18082).await?;
 
     // Create HTTP client with invalid token
     let client = reqwest::Client::new();
     let response = client
-        .get(format!("{}/events?channels=test_channel", server_url))
+        .get(format!("{}/sse?channels=test_channel", server_url))
         .header(
             AUTHORIZATION,
             HeaderValue::from_static("Bearer invalid_token"),
@@ -138,13 +201,14 @@ async fn test_sse_with_invalid_token() -> Result<()> {
 #[ignore] // Requires PostgreSQL with auth functions
 async fn test_sse_without_token() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
+    ensure_auth_functions().await?;
 
     let (server_url, bridge) = start_test_server(true, 18083).await?;
 
     // Create HTTP client without auth header
     let client = reqwest::Client::new();
     let response = client
-        .get(format!("{}/events?channels=test_channel", server_url))
+        .get(format!("{}/sse?channels=test_channel", server_url))
         .send()
         .await?;
 
@@ -169,7 +233,7 @@ async fn test_sse_without_auth_enabled() -> Result<()> {
     // Create HTTP client without auth header (auth not enabled on server)
     let client = reqwest::Client::new();
     let response = client
-        .get(format!("{}/events?channels=test_channel", server_url))
+        .get(format!("{}/sse?channels=test_channel", server_url))
         .send()
         .await?;
 
@@ -185,6 +249,7 @@ async fn test_sse_without_auth_enabled() -> Result<()> {
 #[ignore] // Requires PostgreSQL with auth functions
 async fn test_sse_multiple_channels_with_auth() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
+    ensure_auth_functions().await?;
 
     let (server_url, bridge) = start_test_server(true, 18085).await?;
 
@@ -192,7 +257,7 @@ async fn test_sse_multiple_channels_with_auth() -> Result<()> {
     let client = reqwest::Client::new();
     let response = client
         .get(format!(
-            "{}/events?channels=channel1,channel2,channel3",
+            "{}/sse?channels=channel1,channel2,channel3",
             server_url
         ))
         .header(
@@ -253,9 +318,10 @@ async fn test_sse_multiple_channels_with_auth() -> Result<()> {
 #[ignore] // Requires PostgreSQL with auth functions
 async fn test_authenticator_directly() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
+    ensure_auth_functions().await?;
 
     let db_url = test_db_url();
-    let config = AuthConfig::new("authenticate_user");
+    let config = AuthConfig::new("test_not_prod_authenticate_user");
     let authenticator = Authenticator::new(&db_url, config)
         .await
         .with_context(|| format!("Failed to create authenticator with {}", db_url))?;
@@ -289,9 +355,10 @@ async fn test_authenticator_directly() -> Result<()> {
 #[ignore] // Requires PostgreSQL with auth functions
 async fn test_boolean_auth_function() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
+    ensure_auth_functions().await?;
 
     let db_url = test_db_url();
-    let config = AuthConfig::new("verify_token");
+    let config = AuthConfig::new("test_not_prod_verify_token");
     let authenticator = Authenticator::new(&db_url, config).await?;
 
     // Test with valid token using boolean-only function

@@ -71,6 +71,7 @@ pub enum ServerMessage {
 pub struct Frontend {
     pub websocket: Option<String>,
     pub server_push: Option<String>,
+    pub sse_path: Option<String>,
 }
 
 impl Default for Frontend {
@@ -84,6 +85,7 @@ impl Frontend {
         Self {
             websocket: None,
             server_push: None,
+            sse_path: None,
         }
     }
 
@@ -94,6 +96,11 @@ impl Frontend {
 
     pub fn with_server_push(mut self, bind_addr: String) -> Self {
         self.server_push = Some(bind_addr);
+        self
+    }
+
+    pub fn with_sse_path(mut self, path: String) -> Self {
+        self.sse_path = Some(path);
         self
     }
 }

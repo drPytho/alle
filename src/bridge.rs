@@ -134,7 +134,14 @@ impl Bridge {
                     },
                     async move {
                         info!("Server-Sent Events server starting");
-                        server(se_addr, pg_listener_se, auth_se, cancel_token_se).await
+                        server(
+                            se_addr,
+                            pg_listener_se,
+                            auth_se,
+                            self.config.frontend.sse_path.clone(),
+                            cancel_token_se,
+                        )
+                        .await
                     }
                 )?;
             }
@@ -150,6 +157,7 @@ impl Bridge {
                     se_addr.clone(),
                     Arc::clone(&pg_listener),
                     authenticator,
+                    self.config.frontend.sse_path.clone(),
                     self.cancellation_token.clone(),
                 )
                 .await?;
