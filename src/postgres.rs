@@ -228,7 +228,10 @@ impl PostgresListener {
     /// Unsubscribe from a channel (UNLISTEN)
     async fn execute_unlisten(&self, channel: &ChannelName) -> Result<()> {
         self.client
-            .execute(&format!("UNLISTEN {}", channel.quote_identifier()), &[])
+            .execute(
+                &format!(r#"UNLISTEN "{}""#, channel.quote_identifier()),
+                &[],
+            )
             .await
             .context(format!(
                 "Failed to UNLISTEN on channel '{}'",
